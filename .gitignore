@@ -1,0 +1,35 @@
+# .NET build artifacts
+bin/
+obj/
+out/
+publish/
+*.dll
+*.exe
+*.pdb
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userprefs
+
+# OS
+.DS_Store
+Thumbs.db
+*~
+
+# Logs
+*.log
+
+# Local override config (keep defaults in appsettings.json committed;
+# per-user overrides belong in appsettings.Local.json and aren't tracked)
+appsettings.Local.json
+appsettings.*.json
+!appsettings.json

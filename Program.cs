@@ -11,80 +11,41 @@ var config = new ConfigurationBuilder()
 var options = new BridgeOptions();
 config.GetSection("Bridge").Bind(options);
 
-Console.WriteLine($"[bridge] mirror_dir={options.ResolvedMirrorDir}");
-Console.WriteLine($"[bridge] com_port={options.ComPort} baud={options.BaudRate}");
+Log.Info($"[bridge] mirror_dir={options.ResolvedMirrorDir}");
+Log.Info($"[bridge] com_port={options.ComPort} baud={options.BaudRate}");
+Log.Info($"[bridge] rescan_interval={options.RescanIntervalMs}ms thinking_idle={options.ThinkingIdleMs}ms");
 
 using var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
 {
     e.Cancel = true;
-    cts.Cancel();
+    if (!cts.IsCancellationRequested)
+    {
+        Log.Info("[bridge] shutdown requested, draining...");
+        cts.Cancel();
+    }
 };
 
 using var serial = new SerialOutput(options);
 var broker = new BrokerClient(options);
 
-await RunAsync(options, broker, serial, cts.Token);
+var initialPin = broker.ReadPinnedSessionId();
+Log.Info(initialPin is null
+    ? "[bridge] pin: (none; auto-switching to newest session)"
+    : $"[bridge] pin: {ShortenPin(initialPin)} (auto-switching disabled)");
 
-Console.WriteLine("[bridge] exiting");
+var runner = new BridgeRunner(options, broker, serial);
 
-static async Task RunAsync(
-    BridgeOptions options,
-    BrokerClient broker,
-    SerialOutput serial,
-    CancellationToken ct)
+try
 {
-    BrokerClient.BrokerEndpoint? currentEndpoint = null;
-
-    while (!ct.IsCancellationRequested)
-    {
-        if (!serial.IsOpen && !serial.TryOpen())
-        {
-            await SafeDelay(options.SerialReopenDelayMs, ct);
-        }
-
-        var endpoint = broker.FindNewestBroker();
-        if (endpoint is null)
-        {
-            Console.WriteLine("[bridge] no broker found, scanning...");
-            await SafeDelay(options.ReconnectDelayMs, ct);
-            continue;
-        }
-
-        if (currentEndpoint is null || currentEndpoint.SessionId != endpoint.SessionId)
-        {
-            Console.WriteLine($"[bridge] subscribing to session {endpoint.SessionId[..Math.Min(8, endpoint.SessionId.Length)]} on port {endpoint.Port}");
-            currentEndpoint = endpoint;
-        }
-
-        try
-        {
-            await foreach (var rawLine in broker.StreamEvents(endpoint, ct))
-            {
-                var deviceLine = StateMapper.ToDeviceLine(rawLine);
-                if (deviceLine is null) continue;
-                if (!serial.IsOpen) serial.TryOpen();
-                if (serial.WriteLine(deviceLine))
-                    Console.WriteLine($"[bridge] -> {deviceLine}");
-                else
-                    Console.Error.WriteLine($"[bridge] dropped (serial closed): {deviceLine}");
-            }
-            Console.WriteLine("[bridge] broker closed connection");
-            currentEndpoint = null;
-        }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"[bridge] broker error: {ex.Message}");
-            currentEndpoint = null;
-        }
-
-        await SafeDelay(options.ReconnectDelayMs, ct);
-    }
+    await runner.RunAsync(cts.Token);
+}
+catch (OperationCanceledException)
+{
+    // expected on Ctrl+C
 }
 
-static async Task SafeDelay(int ms, CancellationToken ct)
-{
-    try { await Task.Delay(ms, ct); }
-    catch (OperationCanceledException) { }
-}
+Log.Info("[bridge] exiting");
+return 0;
+
+static string ShortenPin(string id) => id.Length <= 8 ? id : id[..8];

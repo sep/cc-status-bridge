@@ -99,19 +99,43 @@ sessions, with long idle periods in between. Buffer input to accommodate.
 
 ---
 
-## 4. State lexicon (v1)
+## 4. State lexicon (v1.1)
 
-| `state` value | Meaning                                                  |
-|---------------|----------------------------------------------------------|
-| `"working"`   | Claude received a prompt and is processing.              |
-| `"idle"`      | Claude has finished its turn; waiting for next prompt.   |
-| `"blocked"`   | Claude is blocked on user input (permission prompt,      |
-|               | notification requiring acknowledgment).                  |
+| `state` value  | Meaning                                                 |
+|----------------|---------------------------------------------------------|
+| `"working"`    | Claude received a prompt and is actively processing    |
+|                | (typically tool calls in flight).                       |
+| `"thinking"`   | Claude is in a working session but no tool activity    |
+|                | has occurred for N seconds (bridge heuristic).          |
+|                | Suggest same color family as `working`, different text  |
+|                | or glyph (e.g. a meditation icon).                      |
+| `"idle"`       | Claude has finished its turn; waiting for next prompt.  |
+| `"blocked"`    | Claude is blocked on user input (permission prompt,     |
+|                | notification requiring acknowledgment).                 |
+| `"compacting"` | Claude Code is compressing the conversation context.    |
+|                | Usually a 10–60s pause; worth a distinctive visual      |
+|                | (e.g. a slow horizontal sweep) so the user doesn't      |
+|                | think the system is frozen.                             |
+| `"error"`      | A tool call returned an error. Warrants the loudest     |
+|                | visual in your palette (bright red, flashing, etc.).    |
 
 On startup, before any line is received, the firmware should render an
 **implicit "unknown"** state (e.g. dim white, a "..." icon, or a connection
 glyph) so the user knows the device is alive but not yet connected. Once
 the first valid line arrives, switch to the reported state.
+
+### State transition notes
+
+- `thinking` is the bridge's best-guess derived state; it flips back to
+  `working` the moment a tool call fires. Don't treat it as a terminal
+  state — it's a decoration on top of `working`.
+- `compacting` is always bracketed by `PreCompact` / `PostCompact` on
+  the bridge side; after compaction the bridge restores whatever state
+  was active beforehand (most often `working`).
+- `error` is entered by a tool failure but is **not sticky** — the next
+  lifecycle event (Stop, UserPromptSubmit, etc.) will transition out of
+  it normally. Consider a brief "flash then hold" rendering so the error
+  remains visible for a few seconds even if the host moves on quickly.
 
 ---
 
@@ -237,7 +261,96 @@ bridge, no broker — just hand-crafted NDJSON into the serial port.
 
 ---
 
-## 8. Known extension points (for later)
+## 8. Bidirectional protocol extension (v1.1 — PING/ACK)
+
+The v1 contract (§3) is unidirectional host→device. For the bridge to know
+the device is alive and responsive, extend the protocol with a small
+request/response layer. This is additive — a v1.0 firmware that ignores
+unknown fields will remain functional, it just won't answer pings.
+
+### Dispatch rule (device side)
+
+On every incoming line, parse JSON then dispatch by `type`:
+
+| `type` value   | Action                                                    |
+|----------------|-----------------------------------------------------------|
+| `"state"`      | Treat `state` / `event` / `ts` as v1 state update.        |
+| `"ping"`       | Respond with a `pong` (see below).                        |
+| `"resync"`     | Respond with current rendering state as a `state` reply.  |
+| *(missing)*    | Legacy fallback: if a `state` field is present, treat as  |
+|                | a v1 state update. Otherwise ignore the line.             |
+| *(anything else)* | Ignore. Forward-compat for future types.               |
+
+### Host → device messages
+
+**PING** — periodic liveness probe, sent by bridge:
+
+```json
+{"type":"ping","seq":1234,"ts":1713648012.14}
+```
+
+Bridge sends pings every N seconds (configurable, default 5s). Each ping
+carries a monotonically increasing `seq` so host can pair responses.
+
+**RESYNC** — host asks device to report its current rendering state:
+
+```json
+{"type":"resync"}
+```
+
+Useful on bridge startup to detect if the device is already displaying
+something that differs from the host's view of "current state."
+
+### Device → host messages
+
+**PONG** — response to a ping:
+
+```json
+{"type":"pong","seq":1234,"state":"working","uptime_ms":123456}
+```
+
+- `seq` MUST echo the ping's `seq` verbatim.
+- `state` SHOULD reflect the device's currently-rendered state (one of
+  the lexicon values in §4).
+- `uptime_ms` is the device's `esp_timer_get_time() / 1000` — useful for
+  detecting device reboots across pings.
+
+**Spontaneous state** (response to `resync`, or proactive notification):
+
+```json
+{"type":"state","state":"working","uptime_ms":123456}
+```
+
+Sent when the device's rendering state changes for reasons other than
+a direct host instruction (e.g., a local reboot, or transitioning to an
+"unknown" state after N seconds without host contact).
+
+### Bridge behavior
+
+- Send PING every `PingIntervalMs` (default: 5000).
+- If no PONG within `PingTimeoutMs` (default: 2000) after the most recent
+  PING, log `[bridge] device unresponsive (N missed pongs)` and continue.
+- Bridge does NOT stop forwarding state updates when pongs are missing —
+  USB-CDC writes still happen. PING/ACK is informational only.
+- Bridge MAY publish device status to the broker later (as a separate
+  metric) if we decide to surface device-offline state inside Claude.
+
+### Firmware test recipe for PONG
+
+```bash
+# Watch the device's responses on the same serial port:
+stty -F /dev/ttyACM0 115200 cs8 -cstopb -parenb raw
+# In one terminal:
+cat /dev/ttyACM0
+# In another:
+echo '{"type":"ping","seq":1,"ts":0}' > /dev/ttyACM0
+# Expect:
+# {"type":"pong","seq":1,"state":"...","uptime_ms":...}
+```
+
+---
+
+## 9. Known extension points (for later)
 
 When adding firmware support for future fields the bridge may emit,
 prefer a data-driven approach over hard-coding. Likely future fields:
@@ -252,7 +365,7 @@ prefer a data-driven approach over hard-coding. Likely future fields:
 
 ---
 
-## 9. Getting unstuck
+## 10. Getting unstuck
 
 - **Device not enumerating as a COM port on Windows:** check that the
   ESP32-S3 is in normal run mode (not bootloader); the native USB CDC
@@ -268,7 +381,7 @@ prefer a data-driven approach over hard-coding. Likely future fields:
 
 ---
 
-## 10. Pointers to the other halves
+## 11. Pointers to the other halves
 
 - Plugin (hooks + broker, Python): `/mnt/w/sep/claude-status/` in the WSL
   side of the dev environment. The relevant source files are

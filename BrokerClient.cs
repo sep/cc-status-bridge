@@ -46,20 +46,88 @@ public sealed class BrokerClient
         return best;
     }
 
+    public BrokerEndpoint? FindBrokerForSession(string sessionId)
+    {
+        var stateFile = Path.Combine(_options.ResolvedMirrorDir, "sessions", sessionId, "broker.json");
+        if (!File.Exists(stateFile)) return null;
+        try
+        {
+            var node = JsonNode.Parse(File.ReadAllText(stateFile));
+            var port = node?["port"]?.GetValue<int>() ?? 0;
+            if (port <= 0) return null;
+            return new BrokerEndpoint(sessionId, port, File.GetLastWriteTimeUtc(stateFile));
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    public string? ReadPinnedSessionId()
+    {
+        var pinFile = Path.Combine(_options.ResolvedMirrorDir, "pin.json");
+        if (!File.Exists(pinFile)) return null;
+        try
+        {
+            var node = JsonNode.Parse(File.ReadAllText(pinFile));
+            var sid = node?["session_id"]?.GetValue<string>();
+            return string.IsNullOrWhiteSpace(sid) ? null : sid;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    public BrokerEndpoint? PickEndpoint()
+    {
+        var pinned = ReadPinnedSessionId();
+        if (pinned is not null)
+            return FindBrokerForSession(pinned);
+        return FindNewestBroker();
+    }
+
     public async IAsyncEnumerable<string> StreamEvents(
         BrokerEndpoint endpoint,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
         using var client = new TcpClient();
-        await client.ConnectAsync("127.0.0.1", endpoint.Port, ct);
+        try
+        {
+            await client.ConnectAsync("127.0.0.1", endpoint.Port, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            yield break;
+        }
+
         var stream = client.GetStream();
         var handshake = Encoding.ASCII.GetBytes("SUB\n");
-        await stream.WriteAsync(handshake, ct);
+        try
+        {
+            await stream.WriteAsync(handshake, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            yield break;
+        }
 
         using var reader = new StreamReader(stream, Encoding.UTF8);
         while (!ct.IsCancellationRequested)
         {
-            var line = await reader.ReadLineAsync(ct);
+            string? line;
+            try
+            {
+                line = await reader.ReadLineAsync(ct);
+            }
+            catch (OperationCanceledException)
+            {
+                yield break;
+            }
+            catch (IOException)
+            {
+                yield break;
+            }
             if (line is null) yield break;
             if (line.Length == 0) continue;
             yield return line;

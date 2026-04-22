@@ -44,7 +44,7 @@ public sealed class SerialOutput : IDisposable
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[bridge] serial open failed: {ex.Message}");
+                Log.Warn($"[bridge] serial open failed: {ex.Message}");
                 _port?.Dispose();
                 _port = null;
                 return false;
@@ -64,7 +64,7 @@ public sealed class SerialOutput : IDisposable
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[bridge] serial write failed: {ex.Message}");
+                Log.Warn($"[bridge] serial write failed: {ex.Message}");
                 try { _port.Close(); } catch { }
                 _port = null;
                 return false;

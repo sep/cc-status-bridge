@@ -79,12 +79,19 @@ Example (as bytes sent on the wire):
 
 ### Fields
 
-| Field   | Type    | Req? | Notes                                                |
-|---------|---------|------|------------------------------------------------------|
-| `state` | string  | yes  | Lexicon in §4. Firmware MUST handle these three.     |
-| `event` | string  | no   | Original Claude Code hook event name. Informational. |
-| `ts`    | number  | no   | Unix timestamp (seconds, float). Useful for          |
-|         |         |      | animations keyed on "time since last change."        |
+| Field             | Type    | Req? | Notes                                           |
+|-------------------|---------|------|-------------------------------------------------|
+| `state`           | string  | yes  | Lexicon in §4.                                  |
+| `subagent_count`  | integer | yes  | Number of concurrently-running Task subagents   |
+|                   |         |      | in the pinned session. 0 means no subagents.    |
+|                   |         |      | Bridge emits a fresh snapshot whenever this     |
+|                   |         |      | value changes, even if `state` is unchanged —   |
+|                   |         |      | so firmware should re-render on every line.     |
+| `event`           | string  | no   | Original Claude Code hook event name, or        |
+|                   |         |      | `"thinking-heuristic"` for bridge-derived       |
+|                   |         |      | state. Informational.                           |
+| `ts`              | number  | no   | Unix timestamp (seconds, float). Useful for     |
+|                   |         |      | animations keyed on "time since last change."   |
 
 **Forward compatibility:** the firmware MUST ignore unknown fields. Future
 versions of the bridge may emit metrics like `subagent_count`, `tool_name`,
@@ -155,6 +162,7 @@ typedef enum {
 typedef struct {
     status_state_t state;
     int64_t        changed_at_us;   // esp_timer_get_time() at last change
+    int            subagent_count;  // 0..N concurrent Task subagents
     char           event[32];       // optional: last event name
 } status_snapshot_t;
 ```
@@ -239,25 +247,30 @@ $p.Close()
 
 ```bash
 stty -F /dev/ttyACM0 115200 cs8 -cstopb -parenb raw
-echo '{"state":"working"}' > /dev/ttyACM0
+echo '{"state":"working","subagent_count":0}' > /dev/ttyACM0
 sleep 2
-echo '{"state":"blocked"}' > /dev/ttyACM0
+echo '{"state":"working","subagent_count":3}' > /dev/ttyACM0   # spawned 3
 sleep 2
-echo '{"state":"idle"}' > /dev/ttyACM0
+echo '{"state":"blocked","subagent_count":3}'  > /dev/ttyACM0
+sleep 2
+echo '{"state":"idle","subagent_count":0}'     > /dev/ttyACM0
 ```
 
-### Soak test — random transitions every second:
+### Soak test — random state + count transitions every second:
 
 ```bash
 while true; do
-  s=$(shuf -n1 -e idle working blocked)
-  echo "{\"state\":\"$s\",\"ts\":$(date +%s.%N)}" > /dev/ttyACM0
+  s=$(shuf -n1 -e idle working thinking blocked compacting error)
+  c=$(shuf -n1 -e 0 0 0 1 2 3 5)   # weighted toward 0
+  echo "{\"state\":\"$s\",\"subagent_count\":$c,\"ts\":$(date +%s.%N)}" > /dev/ttyACM0
   sleep 1
 done
 ```
 
 This is the fastest iteration loop for firmware work: no Claude, no
 bridge, no broker — just hand-crafted NDJSON into the serial port.
+The soak covers all six states and a plausible range of subagent
+counts, so you can shake out rendering bugs in isolation.
 
 ---
 

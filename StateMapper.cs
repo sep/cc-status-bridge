@@ -12,14 +12,13 @@ public static class StateMapper
     public const string StateError      = "error";
     public const string StateThinking   = "thinking";
 
-    public record Mapped(string? State, string? EventName, JsonNode? Ts, bool IsToolActivity);
+    public record Mapped(
+        string? State,
+        string? EventName,
+        string? ToolName,
+        JsonNode? Ts,
+        bool IsToolActivity);
 
-    /// <summary>
-    /// Parse a broker event line and decide what state it represents, if any.
-    /// Returns a Mapped record; consumers can use State to update the
-    /// rendered state (null means "no change") and IsToolActivity to reset
-    /// the thinking timer.
-    /// </summary>
     public static Mapped? Parse(string rawJsonLine)
     {
         JsonNode? node;
@@ -34,7 +33,8 @@ public static class StateMapper
         if (node is null) return null;
 
         var eventName = node["event"]?.GetValue<string>();
-        var ts = node["ts"];
+        var toolName  = node["tool_name"]?.GetValue<string>();
+        var ts        = node["ts"];
 
         string? state = null;
         var isToolActivity = false;
@@ -54,8 +54,7 @@ public static class StateMapper
                 state = StateCompacting;
                 break;
             case "PostCompact":
-                // Signal end-of-compaction; consumer restores prior state.
-                state = null;
+                state = null;  // consumer restores prior state
                 break;
             case "PreToolUse":
             case "PostToolUse":
@@ -67,14 +66,24 @@ public static class StateMapper
                 isToolActivity = true;
                 state = StateError;
                 break;
+            // SubagentStop: no state change, no tool activity; handled as a
+            // metric signal by BridgeRunner.
         }
 
-        return new Mapped(state, eventName, ts, isToolActivity);
+        return new Mapped(state, eventName, toolName, ts, isToolActivity);
     }
 
-    public static string BuildDeviceLine(string state, string? eventName, JsonNode? ts)
+    public static string BuildDeviceLine(
+        string state,
+        int subagentCount,
+        string? eventName,
+        JsonNode? ts)
     {
-        var doc = new JsonObject { ["state"] = state };
+        var doc = new JsonObject
+        {
+            ["state"] = state,
+            ["subagent_count"] = subagentCount,
+        };
         if (eventName is not null) doc["event"] = eventName;
         if (ts is not null) doc["ts"] = JsonNode.Parse(ts.ToJsonString());
         return doc.ToJsonString();
@@ -82,8 +91,6 @@ public static class StateMapper
 
     private static bool LooksLikeFailure(JsonNode node)
     {
-        // Some Claude Code builds flag errors on PostToolUse via a success
-        // field or an explicit error payload; honor either.
         var success = node["success"];
         if (success is not null && success.GetValueKind() == JsonValueKind.False)
             return true;

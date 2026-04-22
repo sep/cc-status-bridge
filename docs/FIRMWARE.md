@@ -82,16 +82,24 @@ Example (as bytes sent on the wire):
 | Field             | Type    | Req? | Notes                                           |
 |-------------------|---------|------|-------------------------------------------------|
 | `state`           | string  | yes  | Lexicon in §4.                                  |
-| `subagent_count`  | integer | yes  | Number of concurrently-running Task subagents   |
-|                   |         |      | in the pinned session. 0 means no subagents.    |
-|                   |         |      | Bridge emits a fresh snapshot whenever this     |
-|                   |         |      | value changes, even if `state` is unchanged —   |
-|                   |         |      | so firmware should re-render on every line.     |
+| `subagent_count`  | integer | yes  | Number of concurrently-running subagents        |
+|                   |         |      | (Agent tool calls) in the pinned session.       |
+|                   |         |      | 0 means no subagents.                           |
+| `tasks_active`    | integer | yes  | Open tasks (pending + in_progress) in the       |
+|                   |         |      | session's plan/todo list. 0 if none tracked.    |
+| `tasks_completed` | integer | yes  | Tasks marked completed this session.            |
+|                   |         |      | For a "N done of M total" display, compute      |
+|                   |         |      | total = active + completed.                     |
 | `event`           | string  | no   | Original Claude Code hook event name, or        |
 |                   |         |      | `"thinking-heuristic"` for bridge-derived       |
 |                   |         |      | state. Informational.                           |
 | `ts`              | number  | no   | Unix timestamp (seconds, float). Useful for     |
 |                   |         |      | animations keyed on "time since last change."   |
+
+The bridge emits a fresh snapshot whenever *any* of `state`,
+`subagent_count`, `tasks_active`, or `tasks_completed` changes — so
+firmware should re-render on every received line, not only when
+`state` itself changes.
 
 **Forward compatibility:** the firmware MUST ignore unknown fields. Future
 versions of the bridge may emit metrics like `subagent_count`, `tool_name`,
@@ -162,7 +170,9 @@ typedef enum {
 typedef struct {
     status_state_t state;
     int64_t        changed_at_us;   // esp_timer_get_time() at last change
-    int            subagent_count;  // 0..N concurrent Task subagents
+    int            subagent_count;  // 0..N concurrent subagents (Agent tool calls)
+    int            tasks_active;    // pending + in_progress
+    int            tasks_completed; // completed (total = active + completed)
     char           event[32];       // optional: last event name
 } status_snapshot_t;
 ```
@@ -247,13 +257,15 @@ $p.Close()
 
 ```bash
 stty -F /dev/ttyACM0 115200 cs8 -cstopb -parenb raw
-echo '{"state":"working","subagent_count":0}' > /dev/ttyACM0
+echo '{"state":"working","subagent_count":0,"tasks_active":0,"tasks_completed":0}' > /dev/ttyACM0
 sleep 2
-echo '{"state":"working","subagent_count":3}' > /dev/ttyACM0   # spawned 3
+echo '{"state":"working","subagent_count":3,"tasks_active":5,"tasks_completed":0}' > /dev/ttyACM0
 sleep 2
-echo '{"state":"blocked","subagent_count":3}'  > /dev/ttyACM0
+echo '{"state":"working","subagent_count":3,"tasks_active":3,"tasks_completed":2}' > /dev/ttyACM0
 sleep 2
-echo '{"state":"idle","subagent_count":0}'     > /dev/ttyACM0
+echo '{"state":"blocked","subagent_count":3,"tasks_active":3,"tasks_completed":2}' > /dev/ttyACM0
+sleep 2
+echo '{"state":"idle","subagent_count":0,"tasks_active":0,"tasks_completed":5}'    > /dev/ttyACM0
 ```
 
 ### Soak test — random state + count transitions every second:

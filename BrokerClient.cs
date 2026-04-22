@@ -1,6 +1,5 @@
 using System.Net.Sockets;
 using System.Text;
-using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace ClaudeStatusBridge;
@@ -16,67 +15,113 @@ public sealed class BrokerClient
 
     public record BrokerEndpoint(string SessionId, int Port, DateTime Mtime);
 
+    /// <summary>
+    /// Yields every directory the bridge should inspect for broker state
+    /// (sessions/ subtrees and pin.json). Ordered by priority, de-duplicated.
+    ///
+    /// Priority:
+    ///  1. Explicit <see cref="BridgeOptions.MirrorDir"/> override — if set,
+    ///     nothing else is searched.
+    ///  2. Windows mirror path at <c>~/.claude-status</c>. Populated by
+    ///     WSL-side broker.py when mirroring for a Windows bridge. Harmless
+    ///     on native macOS/Linux (the dir simply won't exist).
+    ///  3. Every subdirectory of <c>~/.claude/plugins/data/</c>. This is
+    ///     where Claude Code stores plugin state on native installs. We
+    ///     glob rather than hardcode because the subdirectory name
+    ///     (plugin-name + marketplace-name) isn't stable.
+    /// </summary>
+    public IEnumerable<string> CandidateDataRoots()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var dir in EnumerateCandidates())
+        {
+            if (string.IsNullOrEmpty(dir)) continue;
+            if (!Directory.Exists(dir)) continue;
+            string canonical;
+            try { canonical = Path.GetFullPath(dir); }
+            catch { continue; }
+            if (seen.Add(canonical))
+                yield return canonical;
+        }
+    }
+
+    private IEnumerable<string> EnumerateCandidates()
+    {
+        var explicitDir = _options.ResolvedMirrorDir;
+        if (!string.IsNullOrEmpty(explicitDir))
+        {
+            yield return explicitDir;
+            yield break;  // explicit override wins outright
+        }
+
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrEmpty(home)) yield break;
+
+        yield return Path.Combine(home, ".claude-status");
+
+        var pluginsData = Path.Combine(home, ".claude", "plugins", "data");
+        if (Directory.Exists(pluginsData))
+        {
+            foreach (var sub in Directory.EnumerateDirectories(pluginsData))
+                yield return sub;
+        }
+    }
+
     public BrokerEndpoint? FindNewestBroker()
     {
-        var sessionsDir = Path.Combine(_options.ResolvedMirrorDir, "sessions");
-        if (!Directory.Exists(sessionsDir)) return null;
-
         BrokerEndpoint? best = null;
-        foreach (var sessionDir in Directory.EnumerateDirectories(sessionsDir))
+
+        foreach (var root in CandidateDataRoots())
         {
-            var stateFile = Path.Combine(sessionDir, "broker.json");
-            if (!File.Exists(stateFile)) continue;
-            var mtime = File.GetLastWriteTimeUtc(stateFile);
-            int port;
-            string sessionId;
-            try
+            var sessionsDir = Path.Combine(root, "sessions");
+            if (!Directory.Exists(sessionsDir)) continue;
+
+            foreach (var sessionDir in Directory.EnumerateDirectories(sessionsDir))
             {
-                var node = JsonNode.Parse(File.ReadAllText(stateFile));
-                port = node?["port"]?.GetValue<int>() ?? 0;
-                sessionId = node?["session_id"]?.GetValue<string>() ?? Path.GetFileName(sessionDir);
-                if (port <= 0) continue;
+                var stateFile = Path.Combine(sessionDir, "broker.json");
+                if (!File.Exists(stateFile)) continue;
+
+                var endpoint = ReadEndpointFromStateFile(stateFile, sessionDir);
+                if (endpoint is null) continue;
+
+                if (best is null || endpoint.Mtime > best.Mtime)
+                    best = endpoint;
             }
-            catch (Exception)
-            {
-                continue;
-            }
-            if (best is null || mtime > best.Mtime)
-                best = new BrokerEndpoint(sessionId, port, mtime);
         }
         return best;
     }
 
     public BrokerEndpoint? FindBrokerForSession(string sessionId)
     {
-        var stateFile = Path.Combine(_options.ResolvedMirrorDir, "sessions", sessionId, "broker.json");
-        if (!File.Exists(stateFile)) return null;
-        try
+        foreach (var root in CandidateDataRoots())
         {
-            var node = JsonNode.Parse(File.ReadAllText(stateFile));
-            var port = node?["port"]?.GetValue<int>() ?? 0;
-            if (port <= 0) return null;
-            return new BrokerEndpoint(sessionId, port, File.GetLastWriteTimeUtc(stateFile));
+            var stateFile = Path.Combine(root, "sessions", sessionId, "broker.json");
+            if (!File.Exists(stateFile)) continue;
+            var endpoint = ReadEndpointFromStateFile(stateFile, fallbackSessionId: sessionId);
+            if (endpoint is not null) return endpoint;
         }
-        catch (Exception)
-        {
-            return null;
-        }
+        return null;
     }
 
     public string? ReadPinnedSessionId()
     {
-        var pinFile = Path.Combine(_options.ResolvedMirrorDir, "pin.json");
-        if (!File.Exists(pinFile)) return null;
-        try
+        foreach (var root in CandidateDataRoots())
         {
-            var node = JsonNode.Parse(File.ReadAllText(pinFile));
-            var sid = node?["session_id"]?.GetValue<string>();
-            return string.IsNullOrWhiteSpace(sid) ? null : sid;
+            var pinFile = Path.Combine(root, "pin.json");
+            if (!File.Exists(pinFile)) continue;
+            try
+            {
+                var node = JsonNode.Parse(File.ReadAllText(pinFile));
+                var sid = node?["session_id"]?.GetValue<string>();
+                if (!string.IsNullOrWhiteSpace(sid)) return sid;
+            }
+            catch
+            {
+                // malformed pin file; try next candidate
+            }
         }
-        catch (Exception)
-        {
-            return null;
-        }
+        return null;
     }
 
     public BrokerEndpoint? PickEndpoint()
@@ -96,10 +141,7 @@ public sealed class BrokerClient
         {
             await client.ConnectAsync("127.0.0.1", endpoint.Port, ct);
         }
-        catch (OperationCanceledException)
-        {
-            yield break;
-        }
+        catch (OperationCanceledException) { yield break; }
 
         var stream = client.GetStream();
         var handshake = Encoding.ASCII.GetBytes("SUB\n");
@@ -107,10 +149,7 @@ public sealed class BrokerClient
         {
             await stream.WriteAsync(handshake, ct);
         }
-        catch (OperationCanceledException)
-        {
-            yield break;
-        }
+        catch (OperationCanceledException) { yield break; }
 
         using var reader = new StreamReader(stream, Encoding.UTF8);
         while (!ct.IsCancellationRequested)
@@ -120,17 +159,34 @@ public sealed class BrokerClient
             {
                 line = await reader.ReadLineAsync(ct);
             }
-            catch (OperationCanceledException)
-            {
-                yield break;
-            }
-            catch (IOException)
-            {
-                yield break;
-            }
+            catch (OperationCanceledException) { yield break; }
+            catch (IOException) { yield break; }
+
             if (line is null) yield break;
             if (line.Length == 0) continue;
             yield return line;
+        }
+    }
+
+    private static BrokerEndpoint? ReadEndpointFromStateFile(
+        string stateFile,
+        string? sessionDir = null,
+        string? fallbackSessionId = null)
+    {
+        try
+        {
+            var node = JsonNode.Parse(File.ReadAllText(stateFile));
+            var port = node?["port"]?.GetValue<int>() ?? 0;
+            if (port <= 0) return null;
+            var sessionId = node?["session_id"]?.GetValue<string>()
+                         ?? fallbackSessionId
+                         ?? (sessionDir is not null ? Path.GetFileName(sessionDir) : null);
+            if (string.IsNullOrWhiteSpace(sessionId)) return null;
+            return new BrokerEndpoint(sessionId, port, File.GetLastWriteTimeUtc(stateFile));
+        }
+        catch
+        {
+            return null;
         }
     }
 }

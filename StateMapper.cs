@@ -17,7 +17,18 @@ public static class StateMapper
         string? EventName,
         string? ToolName,
         JsonNode? Ts,
-        bool IsToolActivity);
+        bool IsToolActivity,
+        string? TaskId,
+        string? TaskStatus);
+
+    // Notification subtypes that mean Claude is genuinely waiting on the
+    // user. Other subtypes (idle_prompt = AFK reminder, auth_success =
+    // informational) carry no actionable state change.
+    private static readonly HashSet<string> BlockingNotificationTypes = new()
+    {
+        "permission_prompt",
+        "elicitation_dialog",
+    };
 
     public static Mapped? Parse(string rawJsonLine)
     {
@@ -38,6 +49,25 @@ public static class StateMapper
 
         string? state = null;
         var isToolActivity = false;
+        string? taskId = null;
+        string? taskStatus = null;
+
+        // Task lifecycle extraction.
+        // - PostToolUse(TaskCreate): tool_response.task.id is the fresh ID;
+        //   status defaults to "pending".
+        // - PreToolUse(TaskUpdate): tool_input.taskId and tool_input.status
+        //   describe the transition.
+        if (toolName == "TaskCreate" && eventName == "PostToolUse")
+        {
+            taskId = node["tool_response"]?["task"]?["id"]?.GetValue<string>();
+            taskStatus = "pending";
+        }
+        else if (toolName == "TaskUpdate" && eventName == "PreToolUse")
+        {
+            var input = node["tool_input"];
+            taskId = input?["taskId"]?.GetValue<string>();
+            taskStatus = input?["status"]?.GetValue<string>();
+        }
 
         switch (eventName)
         {
@@ -48,7 +78,10 @@ public static class StateMapper
                 state = StateIdle;
                 break;
             case "Notification":
-                state = StateBlocked;
+                var notifType = node["notification_type"]?.GetValue<string>();
+                if (notifType is not null && BlockingNotificationTypes.Contains(notifType))
+                    state = StateBlocked;
+                // Unknown or non-blocking notification_type: leave state null.
                 break;
             case "PreCompact":
                 state = StateCompacting;
@@ -70,12 +103,14 @@ public static class StateMapper
             // metric signal by BridgeRunner.
         }
 
-        return new Mapped(state, eventName, toolName, ts, isToolActivity);
+        return new Mapped(state, eventName, toolName, ts, isToolActivity, taskId, taskStatus);
     }
 
     public static string BuildDeviceLine(
         string state,
         int subagentCount,
+        int tasksActive,
+        int tasksCompleted,
         string? eventName,
         JsonNode? ts)
     {
@@ -83,6 +118,8 @@ public static class StateMapper
         {
             ["state"] = state,
             ["subagent_count"] = subagentCount,
+            ["tasks_active"] = tasksActive,
+            ["tasks_completed"] = tasksCompleted,
         };
         if (eventName is not null) doc["event"] = eventName;
         if (ts is not null) doc["ts"] = JsonNode.Parse(ts.ToJsonString());

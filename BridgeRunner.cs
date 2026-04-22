@@ -18,8 +18,11 @@ public sealed class BridgeRunner
     private string? _currentState;
     private string? _preCompactState;
     private int _subagentCount;
+    private readonly Dictionary<string, string> _tasks = new();
     private string? _lastEmittedState;
-    private int _lastEmittedCount = -1;  // -1 so the first emit always fires
+    private int _lastEmittedSubagentCount = -1;
+    private int _lastEmittedTasksActive = -1;
+    private int _lastEmittedTasksCompleted = -1;
     private DateTimeOffset _lastToolActivity = DateTimeOffset.Now;
     private string? _currentSessionId;
 
@@ -33,6 +36,7 @@ public sealed class BridgeRunner
     public async Task RunAsync(CancellationToken ct)
     {
         var thinkingTicker = Task.Run(() => ThinkingTickerAsync(ct), ct);
+        var serialMonitor = Task.Run(() => SerialMonitorAsync(ct), ct);
         try
         {
             await SubscriptionLoopAsync(ct);
@@ -40,6 +44,7 @@ public sealed class BridgeRunner
         finally
         {
             try { await thinkingTicker; } catch { }
+            try { await serialMonitor; } catch { }
         }
     }
 
@@ -110,10 +115,17 @@ public sealed class BridgeRunner
             if (sessionId == _currentSessionId) return;
             _currentSessionId = sessionId;
             _subagentCount = 0;
+            _tasks.Clear();
             _preCompactState = null;
             // Don't reset _currentState — let the next event (or replay) set it.
         }
     }
+
+    private int TasksActive =>
+        _tasks.Values.Count(s => s == "pending" || s == "in_progress");
+
+    private int TasksCompleted =>
+        _tasks.Values.Count(s => s == "completed");
 
     private void HandleEvent(string rawLine)
     {
@@ -123,10 +135,21 @@ public sealed class BridgeRunner
         lock (_lock)
         {
             // --- subagent counter ---
-            if (parsed.EventName == "PreToolUse" && parsed.ToolName == "Task")
+            // Claude Code's subagent-spawning tool is named "Agent" on the
+            // wire (not "Task" as one might guess from the user-facing term).
+            if (parsed.EventName == "PreToolUse" && parsed.ToolName == "Agent")
                 _subagentCount++;
             else if (parsed.EventName == "SubagentStop")
                 _subagentCount = Math.Max(0, _subagentCount - 1);
+
+            // --- task counter ---
+            if (parsed.TaskId is not null && parsed.TaskStatus is not null)
+            {
+                if (parsed.TaskStatus == "deleted")
+                    _tasks.Remove(parsed.TaskId);
+                else
+                    _tasks[parsed.TaskId] = parsed.TaskStatus;
+            }
 
             // --- state transitions ---
             if (parsed.IsToolActivity)
@@ -151,6 +174,47 @@ public sealed class BridgeRunner
 
             EmitSnapshotIfChangedLocked(parsed.EventName, parsed.Ts);
         }
+    }
+
+    private async Task SerialMonitorAsync(CancellationToken ct)
+    {
+        var previouslyAvailable = _serial.IsDeviceAvailable();
+        Log.Info($"[bridge] serial monitor: {_options.ComPort} initially {(previouslyAvailable ? "available" : "unavailable")}, polling every {_options.SerialPollIntervalMs}ms");
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(_options.SerialPollIntervalMs, ct);
+                var available = _serial.IsDeviceAvailable();
+
+                if (available && !previouslyAvailable)
+                {
+                    Log.Info($"[bridge] device on {_options.ComPort} appeared");
+                    if (_serial.TryOpen())
+                    {
+                        lock (_lock) ForceReemitCurrentStateLocked();
+                    }
+                }
+                else if (!available && previouslyAvailable)
+                {
+                    Log.Warn($"[bridge] device on {_options.ComPort} disappeared");
+                    _serial.CloseIfOpen();
+                }
+
+                previouslyAvailable = available;
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private void ForceReemitCurrentStateLocked()
+    {
+        if (_currentState is null) return;
+        _lastEmittedState = null;
+        _lastEmittedSubagentCount = -1;
+        _lastEmittedTasksActive = -1;
+        _lastEmittedTasksCompleted = -1;
+        EmitSnapshotIfChangedLocked("device-reconnected", null);
     }
 
     private async Task ThinkingTickerAsync(CancellationToken ct)
@@ -188,10 +252,17 @@ public sealed class BridgeRunner
     private void EmitSnapshotIfChangedLocked(string? eventName, JsonNode? ts)
     {
         if (_currentState is null) return;
-        if (_currentState == _lastEmittedState && _subagentCount == _lastEmittedCount)
+        var tasksActive = TasksActive;
+        var tasksCompleted = TasksCompleted;
+
+        if (_currentState == _lastEmittedState
+            && _subagentCount == _lastEmittedSubagentCount
+            && tasksActive == _lastEmittedTasksActive
+            && tasksCompleted == _lastEmittedTasksCompleted)
             return;
 
-        var line = StateMapper.BuildDeviceLine(_currentState, _subagentCount, eventName, ts);
+        var line = StateMapper.BuildDeviceLine(
+            _currentState, _subagentCount, tasksActive, tasksCompleted, eventName, ts);
         if (!_serial.IsOpen) _serial.TryOpen();
         if (_serial.WriteLine(line))
             Log.Info($"[bridge] -> {line}");
@@ -199,7 +270,9 @@ public sealed class BridgeRunner
             Log.Warn($"[bridge] dropped (serial closed): {line}");
 
         _lastEmittedState = _currentState;
-        _lastEmittedCount = _subagentCount;
+        _lastEmittedSubagentCount = _subagentCount;
+        _lastEmittedTasksActive = tasksActive;
+        _lastEmittedTasksCompleted = tasksCompleted;
     }
 
     private Task StartSubscriptionWatchdog(

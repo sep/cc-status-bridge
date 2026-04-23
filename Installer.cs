@@ -90,12 +90,83 @@ internal static class Installer
         return Start();
     }
 
+    public static int Logs(bool follow, int tailLines)
+    {
+        var path = Log.FilePath;
+        if (path is null)
+        {
+            Console.Error.WriteLine("[bridge] cannot determine log file path on this platform");
+            return 1;
+        }
+        if (!File.Exists(path))
+        {
+            Console.WriteLine($"[bridge] no log file yet at {path}");
+            Console.WriteLine("[bridge] (the bridge writes to this file once it produces output)");
+            return 0;
+        }
+
+        // Print the last `tailLines` lines from the file.
+        PrintTail(path, tailLines);
+
+        if (!follow) return 0;
+
+        // Follow the file: poll for new content every 200ms until Ctrl+C.
+        using var cts = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        fs.Seek(0, SeekOrigin.End);
+        using var reader = new StreamReader(fs, System.Text.Encoding.UTF8);
+
+        while (!cts.IsCancellationRequested)
+        {
+            var line = reader.ReadLine();
+            if (line is null)
+            {
+                System.Threading.Thread.Sleep(200);
+                continue;
+            }
+            Console.WriteLine(line);
+        }
+        return 0;
+    }
+
+    private static void PrintTail(string path, int tailLines)
+    {
+        try
+        {
+            string[] all;
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete))
+            using (var sr = new StreamReader(fs, System.Text.Encoding.UTF8))
+            {
+                all = sr.ReadToEnd().Split('\n');
+            }
+            var start = Math.Max(0, all.Length - tailLines - 1);
+            for (var i = start; i < all.Length; i++)
+            {
+                if (i == all.Length - 1 && all[i].Length == 0) continue;  // trailing empty
+                Console.WriteLine(all[i]);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[bridge] failed to read log: {ex.Message}");
+        }
+    }
+
     // ------------------------------------------------------------------
     // Windows (Scheduled Task)
     // ------------------------------------------------------------------
 
     private static int InstallWindows(string exePath)
     {
+        // Stop any currently-running instance of the existing task first,
+        // otherwise we end up with the old bridge still alive plus a fresh
+        // one started by /Run below.
+        RunQuiet("schtasks", "/End", "/TN", ServiceName);
+
         // /Create /F forces overwrite if the task already exists,
         // which makes install idempotent / upgrade-safe.
         var code = Run("schtasks",
@@ -105,7 +176,6 @@ internal static class Installer
             "/SC", "ONLOGON");
         if (code != 0) return code;
 
-        // Start it now so the user doesn't have to log out.
         Run("schtasks", "/Run", "/TN", ServiceName);
         Console.WriteLine($"[installer] scheduled task '{ServiceName}' registered and started");
         return 0;

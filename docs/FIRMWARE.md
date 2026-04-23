@@ -74,7 +74,7 @@ by a single `\n` (0x0A).
 Example (as bytes sent on the wire):
 
 ```
-{"state":"working","event":"UserPromptSubmit","ts":1713648012.14}\n
+{"client":"1a","state":"working","event":"UserPromptSubmit","ts":1713648012.14}\n
 ```
 
 ### Fields
@@ -82,6 +82,9 @@ Example (as bytes sent on the wire):
 | Field             | Type    | Req? | Notes                                           |
 |-------------------|---------|------|-------------------------------------------------|
 | `state`           | string  | yes  | Lexicon in §4.                                  |
+| `client`          | string  | no   | Target client slot (§3.1). Omitting defaults    |
+|                   |         |      | to the firmware's lowest-ID full-panel slot,    |
+|                   |         |      | which preserves single-panel v1 behavior.       |
 | `subagent_count`  | integer | yes  | Number of concurrently-running subagents        |
 |                   |         |      | (Agent tool calls) in the pinned session.       |
 |                   |         |      | 0 means no subagents.                           |
@@ -101,10 +104,9 @@ The bridge emits a fresh snapshot whenever *any* of `state`,
 firmware should re-render on every received line, not only when
 `state` itself changes.
 
-**Forward compatibility:** the firmware MUST ignore unknown fields. Future
-versions of the bridge may emit metrics like `subagent_count`, `tool_name`,
-or similar. Treat each line independently; do not accumulate state across
-lines based on "was this field present last time?"
+**Forward compatibility:** the firmware MUST ignore unknown fields. Treat
+each line independently; do not accumulate state across lines based on
+"was this field present last time?"
 
 **Malformed lines:** if a line fails to parse as JSON or lacks a valid
 `state`, drop it silently. Do not crash, do not block subsequent lines.
@@ -114,7 +116,66 @@ sessions, with long idle periods in between. Buffer input to accommodate.
 
 ---
 
-## 4. State lexicon (v1.1)
+## 3.1 Addressing and multi-panel operation
+
+A single firmware instance may drive one or more chained HUB75 panels as
+a single logical framebuffer (e.g., two 64×32 panels chained → 128×32).
+Each physical panel can render a **full-panel client** or be split
+vertically into **two half-panel clients**.
+
+### Client slot IDs
+
+Client slot IDs are strings with the form `<N>[a|b]`:
+
+- `N` (decimal integer, 1-indexed) — physical panel index. For a single
+  firmware instance, panels are indexed from `first_id` to
+  `first_id + panel_count - 1`, left-to-right in the chain.
+- `a` / `b` suffix (optional) — half-panel selector. `a` is the left half
+  (columns `0..31` within that panel), `b` is the right half (`32..63`).
+- No suffix — the entire 64×32 panel.
+
+Examples: `"1"`, `"1a"`, `"1b"`, `"2"`, `"2a"`, `"2b"`.
+
+### Conflict rules (mutual exclusion per region)
+
+Full-panel and half-panel slots on the same panel are **mutually
+exclusive**, last-activity-wins per region:
+
+- A line targeting `"1"` wipes any pinned `"1a"` and `"1b"` state; the
+  full 64×32 area is redrawn from the `"1"` snapshot.
+- A line targeting `"1a"` wipes any pinned `"1"` state; `"1a"` renders
+  into its 32×32 half. If `"1b"` had no prior snapshot it renders as a
+  dim "unpinned" placeholder (a single "·" glyph), so the user sees that
+  the half is free to claim.
+- A well-behaved bridge never mixes `"1"` and `"1a"`/`"1b"` streams in
+  practice, but the firmware MUST tolerate the switch without crashing.
+
+### Legacy / unaddressed lines
+
+A line with no `client` field is interpreted as targeting the firmware's
+lowest-ID full-panel slot — i.e., on a single-panel firmware with
+`first_id = 1`, a bare `{"state":"working"}` behaves identically to
+`{"client":"1","state":"working"}`. This preserves compatibility with
+earlier single-panel scripts and test recipes.
+
+### Unknown or out-of-range clients
+
+Lines whose `client` references a slot this firmware doesn't own (e.g.,
+`"3a"` when `panel_count=1`, `first_id=1`) are dropped silently. This
+lets a single serial bus theoretically address multiple ESPs in the
+future without each one crashing on foreign traffic — though v1.2
+firmware is still 1-ESP-per-COM-port.
+
+### Panel layout
+
+Multi-panel setups use a compile-time default of `panel_count=1`,
+`first_id=1`. The bridge can reconfigure these at runtime via the
+`configure` command (§8), which is cached in NVS so reboots don't blank
+the panel while waiting for the bridge to reconnect.
+
+---
+
+## 4. State lexicon (v1.2)
 
 | `state` value  | Meaning                                                 |
 |----------------|---------------------------------------------------------|
@@ -156,15 +217,19 @@ the first valid line arrives, switch to the reported state.
 
 ## 5. Suggested firmware structure (ESP-IDF v6.0)
 
-Three FreeRTOS tasks, communicating through a shared state struct
-protected by a mutex (or use atomics for the state enum).
+Three FreeRTOS tasks, communicating through a shared state table
+protected by a single mutex (contention is negligible at a few
+lines/sec, so a single mutex for all client slots is fine).
 
 ```c
 typedef enum {
     STATUS_UNKNOWN = 0,
     STATUS_IDLE,
     STATUS_WORKING,
+    STATUS_THINKING,
     STATUS_BLOCKED,
+    STATUS_COMPACTING,
+    STATUS_ERROR,
 } status_state_t;
 
 typedef struct {
@@ -174,7 +239,12 @@ typedef struct {
     int            tasks_active;    // pending + in_progress
     int            tasks_completed; // completed (total = active + completed)
     char           event[32];       // optional: last event name
-} status_snapshot_t;
+    bool           pinned;          // false = slot unused / placeholder
+} client_snapshot_t;
+
+// Sized for panel_count * 3 slots: per panel, one full + two halves.
+// MAX_PANELS is a compile-time cap (4 is generous for v1.2).
+client_snapshot_t g_clients[MAX_PANELS * 3];
 ```
 
 ### Task 1 — Serial reader
@@ -257,54 +327,84 @@ $p.Close()
 
 ```bash
 stty -F /dev/ttyACM0 115200 cs8 -cstopb -parenb raw
-echo '{"state":"working","subagent_count":0,"tasks_active":0,"tasks_completed":0}' > /dev/ttyACM0
+# v1.2-addressed (explicit client) — full progression with subagents + tasks
+echo '{"client":"1","state":"working","subagent_count":0,"tasks_active":0,"tasks_completed":0}' > /dev/ttyACM0
 sleep 2
-echo '{"state":"working","subagent_count":3,"tasks_active":5,"tasks_completed":0}' > /dev/ttyACM0
+echo '{"client":"1","state":"working","subagent_count":3,"tasks_active":5,"tasks_completed":0}' > /dev/ttyACM0
 sleep 2
-echo '{"state":"working","subagent_count":3,"tasks_active":3,"tasks_completed":2}' > /dev/ttyACM0
+echo '{"client":"1","state":"working","subagent_count":3,"tasks_active":3,"tasks_completed":2}' > /dev/ttyACM0
 sleep 2
-echo '{"state":"blocked","subagent_count":3,"tasks_active":3,"tasks_completed":2}' > /dev/ttyACM0
+echo '{"client":"1","state":"blocked","subagent_count":3,"tasks_active":3,"tasks_completed":2}' > /dev/ttyACM0
 sleep 2
-echo '{"state":"idle","subagent_count":0,"tasks_active":0,"tasks_completed":5}'    > /dev/ttyACM0
+echo '{"client":"1","state":"idle","subagent_count":0,"tasks_active":0,"tasks_completed":5}'    > /dev/ttyACM0
+
+# Split-panel demo — two clients on halves of panel 1
+echo '{"client":"1a","state":"working","subagent_count":2}' > /dev/ttyACM0
+echo '{"client":"1b","state":"thinking","subagent_count":0}' > /dev/ttyACM0
 ```
 
-### Soak test — random state + count transitions every second:
+### Soak test — random state + count transitions, one client:
 
 ```bash
 while true; do
   s=$(shuf -n1 -e idle working thinking blocked compacting error)
   c=$(shuf -n1 -e 0 0 0 1 2 3 5)   # weighted toward 0
-  echo "{\"state\":\"$s\",\"subagent_count\":$c,\"ts\":$(date +%s.%N)}" > /dev/ttyACM0
+  echo "{\"client\":\"1\",\"state\":\"$s\",\"subagent_count\":$c,\"ts\":$(date +%s.%N)}" \
+    > /dev/ttyACM0
   sleep 1
 done
 ```
 
-This is the fastest iteration loop for firmware work: no Claude, no
-bridge, no broker — just hand-crafted NDJSON into the serial port.
-The soak covers all six states and a plausible range of subagent
-counts, so you can shake out rendering bugs in isolation.
+### Soak test — two-client split, independent transitions:
+
+```bash
+while true; do
+  for slot in 1a 1b; do
+    s=$(shuf -n1 -e idle working thinking blocked compacting error)
+    c=$(shuf -n1 -e 0 0 0 1 2 3 5)
+    echo "{\"client\":\"$slot\",\"state\":\"$s\",\"subagent_count\":$c}" > /dev/ttyACM0
+  done
+  sleep 1
+done
+```
+
+These are the fastest iteration loops for firmware work: no Claude, no
+bridge, no broker — just hand-crafted NDJSON into the serial port. The
+single-client soak covers all six states and a plausible range of
+subagent counts; the split-panel soak additionally shakes out per-half
+rendering, mutex contention, and the "both halves active at once"
+layout.
 
 ---
 
-## 8. Bidirectional protocol extension (v1.1 — PING/ACK)
+## 8. Bidirectional protocol extension (v1.2)
 
-The v1 contract (§3) is unidirectional host→device. For the bridge to know
-the device is alive and responsive, extend the protocol with a small
-request/response layer. This is additive — a v1.0 firmware that ignores
-unknown fields will remain functional, it just won't answer pings.
+The v1.0 contract (§3) was unidirectional host→device. v1.1 added
+PING/PONG and RESYNC for liveness observability. v1.2 adds runtime
+panel configuration and a user-facing identify command, and generalizes
+the PONG shape to report multiple client slots.
+
+All of this is **additive** — a v1.0 firmware that ignores unknown
+fields remains functional, it just won't answer pings, can't be
+reconfigured, and only addresses the default single-panel slot.
 
 ### Dispatch rule (device side)
 
 On every incoming line, parse JSON then dispatch by `type`:
 
-| `type` value   | Action                                                    |
-|----------------|-----------------------------------------------------------|
-| `"state"`      | Treat `state` / `event` / `ts` as v1 state update.        |
-| `"ping"`       | Respond with a `pong` (see below).                        |
-| `"resync"`     | Respond with current rendering state as a `state` reply.  |
-| *(missing)*    | Legacy fallback: if a `state` field is present, treat as  |
-|                | a v1 state update. Otherwise ignore the line.             |
-| *(anything else)* | Ignore. Forward-compat for future types.               |
+| `type` value        | Action                                                    |
+|---------------------|-----------------------------------------------------------|
+| `"state"`           | Treat `state` / `client` / `event` / `ts` / etc. as a    |
+|                     | state update for the addressed client (§3 + §3.1).        |
+| `"ping"`            | Respond with a `pong` (see below).                        |
+| `"resync"`          | Respond with a spontaneous state for every pinned client. |
+| `"identify"`        | Briefly render this ESP's panel IDs and resume (see       |
+|                     | below).                                                   |
+| `"configure"`       | Apply new panel layout at runtime, ack with `configured`. |
+| *(missing)*         | Legacy fallback: if a `state` field is present, treat as  |
+|                     | a v1 state update targeting the default client. Otherwise |
+|                     | ignore the line.                                          |
+| *(anything else)*   | Ignore. Forward-compat for future types.                  |
 
 ### Host → device messages
 
@@ -314,8 +414,8 @@ On every incoming line, parse JSON then dispatch by `type`:
 {"type":"ping","seq":1234,"ts":1713648012.14}
 ```
 
-Bridge sends pings every N seconds (configurable, default 5s). Each ping
-carries a monotonically increasing `seq` so host can pair responses.
+Bridge sends pings every N seconds (default 5s). Each ping carries a
+monotonically increasing `seq` so host can pair responses.
 
 **RESYNC** — host asks device to report its current rendering state:
 
@@ -326,51 +426,136 @@ carries a monotonically increasing `seq` so host can pair responses.
 Useful on bridge startup to detect if the device is already displaying
 something that differs from the host's view of "current state."
 
-### Device → host messages
-
-**PONG** — response to a ping:
+**IDENTIFY** — host asks each ESP to briefly render its panel IDs
+large and centered, so the user can verify which physical display is
+which after rearranging cables:
 
 ```json
-{"type":"pong","seq":1234,"state":"working","uptime_ms":123456}
+{"type":"identify","duration_ms":5000}
+```
+
+- `duration_ms` — how long to show the ID. Optional; defaults to `5000`.
+  Firmware MUST clamp to `[500, 30000]` so a typo can't wedge the
+  display.
+- During the identify window the firmware suspends normal state
+  rendering and paints each owned panel's ID (e.g., `"1"`, or `"1 2"`
+  for a chain) in large glyphs. State updates received during the
+  window are applied to the snapshot but not rendered until identify
+  ends.
+- Bridge typically emits identify only on explicit user request.
+
+**CONFIGURE** — host reconfigures the panel layout at runtime:
+
+```json
+{"type":"configure","panel_count":1,"panel_width":64,"panel_height":32,
+ "layout":"horizontal","first_id":1}
+```
+
+- `panel_count` (1..4) — chained panels driven by this ESP.
+- `panel_width` — must be in the allow-list `{32, 64}`.
+- `panel_height` — must be in the allow-list `{16, 32, 64}`.
+- `layout` — one of `"horizontal"`, `"vertical"`, `"serpentine"`. Only
+  `"horizontal"` is fully exercised in v1.2.
+- `first_id` (1..99) — the lowest client ID this ESP owns; the others
+  are `first_id..first_id+panel_count-1`.
+- **Validation is strict**: any missing / out-of-range / wrong-type
+  field causes the entire command to be dropped silently. The firmware
+  never partially applies a configure.
+- **No-op short-circuit**: if the new config is byte-identical to the
+  current config, firmware skips the driver teardown/rebuild entirely
+  to avoid DMA churn. A `configured` ack is still emitted.
+- **NVS-backed**: the last successfully-applied configure is cached in
+  NVS so reboots restore it, preventing a blank panel while waiting for
+  the bridge to reconnect.
+- **Pins are NOT configurable**: GPIO assignments are physical wiring
+  and live in firmware. The bridge never specifies pins.
+
+### Device → host messages
+
+**PONG** — response to a ping. Reports a summary of every currently-
+pinned client slot:
+
+```json
+{
+  "type":"pong","seq":1234,
+  "panel_count":1,"first_id":1,
+  "clients":{
+    "1a":{"state":"working","subagent_count":2,"uptime_ms_at_change":121000},
+    "1b":{"state":"idle","subagent_count":0,"uptime_ms_at_change":98500}
+  },
+  "uptime_ms":123456
+}
 ```
 
 - `seq` MUST echo the ping's `seq` verbatim.
-- `state` SHOULD reflect the device's currently-rendered state (one of
-  the lexicon values in §4).
-- `uptime_ms` is the device's `esp_timer_get_time() / 1000` — useful for
+- `clients` — map of client-ID → per-slot snapshot. Only slots that
+  have ever received a state update appear here; unpinned slots are
+  omitted.
+- `panel_count` / `first_id` — echo the current layout for bridge
+  sanity-checking.
+- `uptime_ms` — device's `esp_timer_get_time() / 1000`, useful for
   detecting device reboots across pings.
+- `uptime_ms_at_change` — value of `uptime_ms` when that slot's state
+  last changed, for the bridge's "time since last change" display.
 
 **Spontaneous state** (response to `resync`, or proactive notification):
 
 ```json
-{"type":"state","state":"working","uptime_ms":123456}
+{"type":"state","client":"1a","state":"working","subagent_count":2,
+ "uptime_ms":123456}
 ```
 
-Sent when the device's rendering state changes for reasons other than
-a direct host instruction (e.g., a local reboot, or transitioning to an
-"unknown" state after N seconds without host contact).
+- One message per pinned client. On `resync`, firmware emits N of these
+  back-to-back (one per populated slot).
+- Also sent when the device's rendering state changes for reasons other
+  than a direct host instruction (e.g., a local reboot, or transitioning
+  a slot to "unknown" after N seconds without contact for that slot).
+
+**CONFIGURED** — ack for a successful configure:
+
+```json
+{"type":"configured","panel_count":1,"panel_width":64,"panel_height":32,
+ "layout":"horizontal","first_id":1,"changed":true,"uptime_ms":123456}
+```
+
+- Echoes the applied config verbatim (including the no-op case, where
+  `changed:false` signals "already this way, nothing to do").
+- Bridge should not assume a configure succeeded until it sees the
+  matching `configured` ack; silent drops (validation failures) produce
+  no response.
 
 ### Bridge behavior
 
 - Send PING every `PingIntervalMs` (default: 5000).
-- If no PONG within `PingTimeoutMs` (default: 2000) after the most recent
-  PING, log `[bridge] device unresponsive (N missed pongs)` and continue.
-- Bridge does NOT stop forwarding state updates when pongs are missing —
-  USB-CDC writes still happen. PING/ACK is informational only.
+- If no PONG within `PingTimeoutMs` (default: 2000) after the most
+  recent PING, log `[bridge] device unresponsive (N missed pongs)` and
+  continue. Do NOT stop forwarding state updates when pongs are
+  missing — USB-CDC writes still happen. PING/PONG is informational.
+- On connect / reconnect, the bridge SHOULD emit a `configure` with
+  its intended layout followed by a `resync` so the initial state is
+  reconciled before real traffic starts.
 - Bridge MAY publish device status to the broker later (as a separate
   metric) if we decide to surface device-offline state inside Claude.
 
-### Firmware test recipe for PONG
+### Firmware test recipe for bidirectional traffic
 
 ```bash
 # Watch the device's responses on the same serial port:
 stty -F /dev/ttyACM0 115200 cs8 -cstopb -parenb raw
-# In one terminal:
+# Terminal A:
 cat /dev/ttyACM0
-# In another:
-echo '{"type":"ping","seq":1,"ts":0}' > /dev/ttyACM0
-# Expect:
-# {"type":"pong","seq":1,"state":"...","uptime_ms":...}
+# Terminal B:
+echo '{"type":"ping","seq":1}'                                 > /dev/ttyACM0
+# Expect: {"type":"pong","seq":1,"panel_count":...,"clients":{...}}
+
+echo '{"type":"identify"}'                                     > /dev/ttyACM0
+# Expect: 5s of large-glyph panel IDs on the display, then resume.
+
+echo '{"type":"configure","panel_count":2,"panel_width":64,"panel_height":32,"layout":"horizontal","first_id":1}' > /dev/ttyACM0
+# Expect: {"type":"configured","panel_count":2,...,"changed":true,...}
+
+echo '{"type":"configure","panel_count":9999}'                 > /dev/ttyACM0
+# Expect: no response (validation drop); display unchanged.
 ```
 
 ---
@@ -380,13 +565,22 @@ echo '{"type":"ping","seq":1,"ts":0}' > /dev/ttyACM0
 When adding firmware support for future fields the bridge may emit,
 prefer a data-driven approach over hard-coding. Likely future fields:
 
-- `subagent_count` (int) — number of currently-running Claude subagents.
-  Natural rendering: a vertical bar graph on one edge of the matrix.
 - `tool_name` (string) — currently-executing tool. Rendering: small text
   banner, or a themed icon.
+- `progress` (object) — when Claude has emitted a multi-step plan, the
+  bridge may include `{"current":2,"total":7}` so the firmware can draw
+  a progress bar along the top border.
 - `elapsed_ms` (int) — time since current state started. The firmware
   can already compute this locally from `ts` + `esp_timer_get_time`, so
   this field is only useful if the host has more precise info.
+
+Likely future `type`-dispatched commands:
+
+- `"brightness"` — adjust panel brightness at runtime without flashing
+  new firmware. Shape: `{"type":"brightness","level":0..255}`.
+- `"set_first_id"` — reassign this ESP's `first_id` without touching
+  the rest of the configure payload. Convenience alias when the bridge
+  just wants to renumber.
 
 ---
 

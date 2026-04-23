@@ -108,6 +108,7 @@ public static class StateMapper
 
     public static string BuildDeviceLine(
         string state,
+        string? clientSlot,
         int subagentCount,
         int tasksActive,
         int tasksCompleted,
@@ -121,6 +122,7 @@ public static class StateMapper
             ["tasks_active"] = tasksActive,
             ["tasks_completed"] = tasksCompleted,
         };
+        if (clientSlot is not null) doc["client"] = clientSlot;
         if (eventName is not null) doc["event"] = eventName;
         if (ts is not null) doc["ts"] = JsonNode.Parse(ts.ToJsonString());
         return doc.ToJsonString();

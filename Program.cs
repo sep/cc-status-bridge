@@ -1,6 +1,12 @@
 using ClaudeStatusBridge;
 using Microsoft.Extensions.Configuration;
 
+// On Windows, when we're launched without a parent console (scheduled
+// task), the OS allocates a console window for our process. Hide it so
+// service runs are silent. When launched from pwsh / cmd, the console is
+// shared with the parent and we leave it visible.
+ConsoleAttach.HideConsoleIfOwned();
+
 // Subcommand dispatch. Anything other than the defaults falls through to
 // running the bridge in the foreground.
 if (args.Length > 0)
@@ -13,6 +19,13 @@ if (args.Length > 0)
         case "stop":      return Installer.Stop();
         case "restart":   return Installer.Restart();
         case "status":    return Installer.Status();
+        case "logs":
+            // bridge logs           — last 50 lines, then follow
+            // bridge logs --no-follow — last 50 lines, then exit
+            // bridge logs --all     — entire file, then follow
+            var follow = !args.Contains("--no-follow");
+            var tail = args.Contains("--all") ? int.MaxValue : 50;
+            return Installer.Logs(follow, tail);
         case "version":
         case "--version":
         case "-v":
@@ -31,6 +44,16 @@ var config = new ConfigurationBuilder()
     .AddEnvironmentVariables(prefix: "CSB_")
     .AddCommandLine(args)
     .Build();
+
+// Foreground / service mode below this point. Take a single-instance lock
+// so multiple stray bridges can't pile up (even if the scheduler fires more
+// than one launch).
+using var singleInstance = SingleInstance.TryAcquire();
+if (singleInstance is null)
+{
+    Log.Warn("[bridge] another instance is already running; exiting");
+    return 0;
+}
 
 var options = new BridgeOptions();
 config.GetSection("Bridge").Bind(options);
@@ -89,6 +112,9 @@ static void PrintHelp()
         "  ClaudeStatusBridge stop          Stop the running service (stays registered)\n" +
         "  ClaudeStatusBridge restart       Stop then start\n" +
         "  ClaudeStatusBridge status        Show install / running / version\n" +
+        "  ClaudeStatusBridge logs          Tail the bridge log (Ctrl+C to exit)\n" +
+        "                                   --no-follow: print and exit\n" +
+        "                                   --all: print entire file from start\n" +
         "  ClaudeStatusBridge version       Print version string\n" +
         "  ClaudeStatusBridge help          This message\n" +
         "\n" +

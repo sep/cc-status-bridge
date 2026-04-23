@@ -23,6 +23,7 @@ public sealed class BridgeRunner
     private int _lastEmittedSubagentCount = -1;
     private int _lastEmittedTasksActive = -1;
     private int _lastEmittedTasksCompleted = -1;
+    private string? _lastEmittedClientSlot;
     private DateTimeOffset _lastToolActivity = DateTimeOffset.Now;
     private string? _currentSessionId;
 
@@ -214,6 +215,7 @@ public sealed class BridgeRunner
         _lastEmittedSubagentCount = -1;
         _lastEmittedTasksActive = -1;
         _lastEmittedTasksCompleted = -1;
+        _lastEmittedClientSlot = null;
         EmitSnapshotIfChangedLocked("device-reconnected", null);
     }
 
@@ -254,15 +256,21 @@ public sealed class BridgeRunner
         if (_currentState is null) return;
         var tasksActive = TasksActive;
         var tasksCompleted = TasksCompleted;
+        // Re-read route on each emit so /claude-status:route changes take
+        // effect at the next snapshot without a bridge restart.
+        var clientSlot = _currentSessionId is null
+            ? null
+            : _broker.ReadRouteForSession(_currentSessionId);
 
         if (_currentState == _lastEmittedState
             && _subagentCount == _lastEmittedSubagentCount
             && tasksActive == _lastEmittedTasksActive
-            && tasksCompleted == _lastEmittedTasksCompleted)
+            && tasksCompleted == _lastEmittedTasksCompleted
+            && clientSlot == _lastEmittedClientSlot)
             return;
 
         var line = StateMapper.BuildDeviceLine(
-            _currentState, _subagentCount, tasksActive, tasksCompleted, eventName, ts);
+            _currentState, clientSlot, _subagentCount, tasksActive, tasksCompleted, eventName, ts);
         if (!_serial.IsOpen) _serial.TryOpen();
         if (_serial.WriteLine(line))
             Log.Info($"[bridge] -> {line}");
@@ -273,6 +281,7 @@ public sealed class BridgeRunner
         _lastEmittedSubagentCount = _subagentCount;
         _lastEmittedTasksActive = tasksActive;
         _lastEmittedTasksCompleted = tasksCompleted;
+        _lastEmittedClientSlot = clientSlot;
     }
 
     private Task StartSubscriptionWatchdog(

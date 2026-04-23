@@ -124,6 +124,31 @@ public sealed class BrokerClient
         return null;
     }
 
+    /// <summary>
+    /// Look up the display client slot for a session, written by the
+    /// plugin's /claude-status:route slash-command handler. Returns null
+    /// if no route is configured for this session.
+    /// </summary>
+    public string? ReadRouteForSession(string sessionId)
+    {
+        foreach (var root in CandidateDataRoots())
+        {
+            var routeFile = Path.Combine(root, "routes.json");
+            if (!File.Exists(routeFile)) continue;
+            try
+            {
+                var node = JsonNode.Parse(File.ReadAllText(routeFile));
+                var slot = node?[sessionId]?.GetValue<string>();
+                if (!string.IsNullOrWhiteSpace(slot)) return slot;
+            }
+            catch
+            {
+                // malformed; try next candidate
+            }
+        }
+        return null;
+    }
+
     public BrokerEndpoint? PickEndpoint()
     {
         var pinned = ReadPinnedSessionId();

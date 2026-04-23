@@ -65,6 +65,19 @@ jobs:
           cd out/${{ matrix.rid }}
           mv "ClaudeStatusBridge${{ matrix.exe_suffix }}" "ClaudeStatusBridge-${{ matrix.rid }}${{ matrix.exe_suffix }}"
 
+      # Ad-hoc codesign on macOS. .NET's publish step usually does this
+      # already on osx-arm64, but we re-sign defensively to make sure both
+      # x64 and arm64 binaries are signed identically. This does NOT bypass
+      # Gatekeeper for downloaded files (notarization would, but that needs
+      # an Apple Developer cert) — it just ensures the binary actually runs
+      # on Apple Silicon, which requires at-least-ad-hoc signing.
+      - name: Ad-hoc codesign (macOS only)
+        if: startsWith(matrix.rid, 'osx-')
+        run: |
+          binary="out/${{ matrix.rid }}/ClaudeStatusBridge-${{ matrix.rid }}${{ matrix.exe_suffix }}"
+          codesign --force --deep --sign - "$binary"
+          codesign --verify --verbose "$binary"
+
       - uses: actions/upload-artifact@v4
         with:
           name: bridge-${{ matrix.rid }}
@@ -98,3 +111,42 @@ jobs:
           files: release/*
           generate_release_notes: true
           fail_on_unmatched_files: true
+          body: |
+            ## Install
+
+            Pick the binary for your platform:
+
+            | Platform     | File                                 |
+            |--------------|--------------------------------------|
+            | Windows x64  | `ClaudeStatusBridge-win-x64.exe`     |
+            | Linux x64    | `ClaudeStatusBridge-linux-x64`       |
+            | macOS Intel  | `ClaudeStatusBridge-osx-x64`         |
+            | macOS Apple Silicon | `ClaudeStatusBridge-osx-arm64` |
+
+            **macOS only — clear the Gatekeeper quarantine before first run:**
+
+            ```bash
+            chmod +x ClaudeStatusBridge-osx-arm64
+            xattr -dr com.apple.quarantine ./ClaudeStatusBridge-osx-arm64
+            ./ClaudeStatusBridge-osx-arm64 install
+            ```
+
+            (Without the `xattr` step, macOS will refuse to launch the
+            binary when the launchd agent tries to start it. The binary is
+            ad-hoc signed but not notarized — full notarization requires a
+            paid Apple Developer cert and isn't worth it for a self-hosted
+            tool.)
+
+            **Linux / Windows:**
+
+            ```bash
+            chmod +x ClaudeStatusBridge-linux-x64   # Linux only
+            ./ClaudeStatusBridge-<rid> install
+            ```
+
+            Verify file integrity against `SHA256SUMS.txt` if you want.
+
+            ## Subcommands
+
+            `install` / `uninstall` / `start` / `stop` / `restart` /
+            `status` / `version` / `logs` — see `--help` for details.

@@ -1,0 +1,17 @@
+title: ClaudePanel Bridge
+description: Cross-platform USB-serial transport for the ClaudePanel external status display.
+theme: jekyll-theme-cayman
+
+# url + baseurl deliberately omitted — GitHub Pages auto-injects them
+# for project sites (https://<org>.github.io/<repo>).
+
+show_downloads: false
+
+markdown: kramdown
+kramdown:
+  syntax_highlighter: rouge
+
+exclude:
+  - README.md
+  - Gemfile
+  - Gemfile.lock

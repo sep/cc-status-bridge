@@ -18,6 +18,7 @@ if (args.Length > 0)
         case "start":     return Installer.Start();
         case "stop":      return Installer.Stop();
         case "restart":   return Installer.Restart();
+        case "match":     return Installer.Match(115200);
         case "status":    return Installer.Status();
         case "logs":
             // bridge logs           — last 50 lines, then follow
@@ -38,9 +39,17 @@ if (args.Length > 0)
     }
 }
 
+// Load config from BOTH the runtime base directory (the .NET host's
+// working dir, which for a single-file self-contained EXE may be a
+// temp extract path) AND the directory containing the actual binary,
+// since `bridge match` writes appsettings.json next to the binary.
+// Whichever has a real file wins; later sources override earlier ones.
+var binaryDir = Path.GetDirectoryName(Environment.ProcessPath ?? "")
+                ?? AppContext.BaseDirectory;
 var config = new ConfigurationBuilder()
     .SetBasePath(AppContext.BaseDirectory)
     .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
+    .AddJsonFile(Path.Combine(binaryDir, "appsettings.json"), optional: true, reloadOnChange: false)
     .AddEnvironmentVariables(prefix: "CSB_")
     .AddCommandLine(args)
     .Build();
@@ -111,6 +120,8 @@ static void PrintHelp()
         "  ClaudeStatusBridge start         Start the registered service\n" +
         "  ClaudeStatusBridge stop          Stop the running service (stays registered)\n" +
         "  ClaudeStatusBridge restart       Stop then start\n" +
+        "  ClaudeStatusBridge match         Scan USB serial ports for a ClaudePanel\n" +
+        "                                   and write the chosen port to appsettings.json\n" +
         "  ClaudeStatusBridge status        Show install / running / version\n" +
         "  ClaudeStatusBridge logs          Tail the bridge log (Ctrl+C to exit)\n" +
         "                                   --no-follow: print and exit\n" +

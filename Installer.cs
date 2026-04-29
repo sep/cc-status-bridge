@@ -90,6 +90,134 @@ internal static class Installer
         return Start();
     }
 
+    /// <summary>
+    /// Scan serial ports, probe each with PING, and write the chosen
+    /// port to an appsettings.json next to the binary. Interactive.
+    /// </summary>
+    public static int Match(int baudRate)
+    {
+        Console.WriteLine("[match] scanning serial ports...");
+        var ports = Discovery.EnumeratePorts();
+        if (ports.Count == 0)
+        {
+            Console.Error.WriteLine("[match] no candidate serial ports found");
+            Console.Error.WriteLine("[match] is your ClaudePanel hardware plugged in via USB?");
+            return 1;
+        }
+
+        var results = ports.Select(p => Discovery.Probe(p, baudRate)).ToList();
+        var matches = results.Where(r => r.IsClaudePanel).ToList();
+
+        Console.WriteLine();
+        Console.WriteLine($"  {"Port",-32}  Status");
+        Console.WriteLine($"  {new string('-', 32)}  {new string('-', 50)}");
+        foreach (var r in results)
+        {
+            var marker = r.IsClaudePanel ? "✓" : " ";
+            var msg = r.IsClaudePanel ? $"ClaudePanel ({r.Detail})" : $"({r.Detail})";
+            Console.WriteLine($"  {r.Port,-32} {marker} {msg}");
+        }
+        Console.WriteLine();
+
+        string? chosen;
+        if (matches.Count == 1)
+        {
+            chosen = matches[0].Port;
+            Console.Write($"Set {chosen} as the bridge's serial port? [Y/n] ");
+            var response = (Console.ReadLine() ?? "").Trim().ToLowerInvariant();
+            if (response != "" && response != "y" && response != "yes")
+            {
+                Console.WriteLine("[match] cancelled");
+                return 1;
+            }
+        }
+        else if (matches.Count > 1)
+        {
+            Console.WriteLine("Multiple ClaudePanels responded:");
+            for (var i = 0; i < matches.Count; i++)
+                Console.WriteLine($"  {i + 1}) {matches[i].Port}  ({matches[i].Detail})");
+            Console.Write($"Pick one [1-{matches.Count}] or 0 to cancel: ");
+            chosen = ReadChoice(matches.Count, matches.Select(m => m.Port).ToList());
+            if (chosen is null) { Console.WriteLine("[match] cancelled"); return 1; }
+        }
+        else
+        {
+            Console.WriteLine("No ClaudePanels responded to PING. Possible reasons:");
+            Console.WriteLine("  - the device firmware doesn't speak the v1.2 protocol yet");
+            Console.WriteLine("  - another application has the port open");
+            Console.WriteLine("  - the device just rebooted and isn't ready to respond");
+            Console.WriteLine();
+            Console.WriteLine("If you know which port your ClaudePanel is on, pick it from");
+            Console.WriteLine("the candidates and we'll write it to the config anyway:");
+            for (var i = 0; i < ports.Count; i++)
+                Console.WriteLine($"  {i + 1}) {ports[i]}");
+            Console.Write($"Pick one [1-{ports.Count}] or 0 to cancel: ");
+            chosen = ReadChoice(ports.Count, ports);
+            if (chosen is null) { Console.WriteLine("[match] cancelled"); return 1; }
+        }
+
+        return WriteComPortConfig(chosen);
+    }
+
+    private static string? ReadChoice(int max, IList<string> options)
+    {
+        var input = (Console.ReadLine() ?? "").Trim();
+        if (!int.TryParse(input, out var choice) || choice < 1 || choice > max)
+            return null;
+        return options[choice - 1];
+    }
+
+    private static int WriteComPortConfig(string comPort)
+    {
+        var binaryDir = Path.GetDirectoryName(Environment.ProcessPath ?? "")
+                        ?? AppContext.BaseDirectory;
+        var configPath = Path.Combine(binaryDir, "appsettings.json");
+
+        System.Text.Json.Nodes.JsonObject root;
+        if (File.Exists(configPath))
+        {
+            try
+            {
+                root = (System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(configPath))
+                       as System.Text.Json.Nodes.JsonObject) ?? new();
+            }
+            catch
+            {
+                root = new();
+            }
+        }
+        else
+        {
+            root = new();
+        }
+
+        if (root["Bridge"] is not System.Text.Json.Nodes.JsonObject bridge)
+        {
+            bridge = new System.Text.Json.Nodes.JsonObject();
+            root["Bridge"] = bridge;
+        }
+        bridge["ComPort"] = comPort;
+
+        try
+        {
+            File.WriteAllText(configPath,
+                root.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[match] failed to write {configPath}: {ex.Message}");
+            return 1;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"[match] wrote {configPath}");
+        Console.WriteLine($"[match] Bridge:ComPort = {comPort}");
+        Console.WriteLine();
+        Console.WriteLine("Restart the bridge to pick up the new config:");
+        Console.WriteLine("  bridge restart");
+        return 0;
+    }
+
     public static int Logs(bool follow, int tailLines)
     {
         var path = Log.FilePath;

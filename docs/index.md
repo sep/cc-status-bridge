@@ -148,17 +148,25 @@ xattr -dr com.apple.quarantine ./ClaudeStatusBridge-osx-arm64
   })();
 </script>
 
+## Find your hardware
+
+The bridge needs to know which USB serial port your ClaudePanel is on.
+Easiest way to figure it out:
+
+```text
+bridge match
+```
+
+`match` scans every plausible serial port, asks each one to identify
+itself, and offers to write the chosen port into `appsettings.json` for
+you. Run it once after install (or whenever you switch USB cables).
+
 ## After install
 
 The bridge runs in the background. To see it working:
 
 1. Plug your ESP32-S3 ClaudePanel hardware in via USB.
-2. Make sure the bridge is configured to point at the right serial port
-   (default is `COM4` on Windows; on macOS / Linux you'll want to set
-   <code>Bridge:ComPort</code> to something like
-   <code>/dev/cu.usbmodem*</code>). See the
-   <a href="https://github.com/sep/cc-status-bridge#configuration">configuration
-   notes</a> on the repo.
+2. Run `bridge match` and confirm the port it found.
 3. Send a prompt in any Claude Code session that has the
    <a href="https://sep.github.io/cc-status-plugin/">ClaudePanel plugin</a>
    installed. The matrix should react.
@@ -171,6 +179,8 @@ The bridge runs in the background. To see it working:
 | `uninstall`        | Stop + deregister.                                  |
 | `start` / `stop`   | Toggle the running instance without deregistering.  |
 | `restart`          | Stop then start.                                    |
+| `match`            | Scan + identify a connected ClaudePanel; write the  |
+|                    | chosen port to `appsettings.json`.                  |
 | `status`           | Show install state, running state, and version.     |
 | `version`          | Print the version string.                           |
 | `logs`             | Tail the bridge log (Ctrl-C to exit).               |

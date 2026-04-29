@@ -97,7 +97,13 @@ public static class StateMapper
                 break;
             case "PostToolUseFailure":
                 isToolActivity = true;
-                state = StateError;
+                // ESC during a tool call surfaces here as is_interrupt:true.
+                // Treat that as idle (Claude was stopped, not broken),
+                // not as an error state.
+                var errNode = node["error"];
+                var isInterrupt = errNode is JsonObject errObj
+                    && errObj["is_interrupt"]?.GetValue<bool>() == true;
+                state = isInterrupt ? StateIdle : StateError;
                 break;
             // SubagentStop: no state change, no tool activity; handled as a
             // metric signal by BridgeRunner.

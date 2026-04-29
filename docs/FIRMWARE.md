@@ -64,6 +64,28 @@ Assign ESP32-S3 GPIOs to these signals per whatever HUB75 library is chosen
 (see §6). The E pin is unused on a 32-row panel (1/16 scan) but must still
 be connected to a safe GPIO.
 
+### USB-CDC line state and host disconnects
+
+The bridge **does not assert DTR or RTS** on the CDC port. Firmware MUST
+NOT depend on these lines being driven — treat them as "don't care."
+
+The bridge also closes its end of the CDC connection when stopped or
+restarted (every `bridge restart`, `bridge stop`, install/upgrade cycle,
+device unplug, etc.). The firmware MUST be resilient to host
+disconnects: a CDC connection close should not wedge the render loop or
+brick rendering until a manual device reset.
+
+Recommended firmware behavior on host disconnect:
+
+- Keep rendering the last received frame (default — least surprising
+  for quick bridge restarts during dev).
+- Optionally, after N seconds of host silence, dim the panel or show a
+  small "host gone" glyph in a corner so users can tell stale state
+  apart from current state.
+- A reconnect (host re-opens the CDC port and starts sending lines
+  again) MUST resume normal rendering without requiring a device
+  reboot.
+
 ---
 
 ## 3. Serial wire contract (authoritative)

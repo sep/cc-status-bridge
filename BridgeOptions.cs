@@ -16,6 +16,7 @@ public sealed class BridgeOptions
     public int SerialReopenDelayMs { get; set; } = 1000;
     public int RescanIntervalMs { get; set; } = 5000;
     public int ThinkingIdleMs { get; set; } = 8000;
+    public int InterruptIdleMs { get; set; } = 300000;  // 5 minutes
     public int SerialPollIntervalMs { get; set; } = 2000;
 
     public string? ResolvedMirrorDir =>

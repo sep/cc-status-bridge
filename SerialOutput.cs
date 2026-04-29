@@ -117,8 +117,13 @@ public sealed class SerialOutput : IDisposable
                     NewLine = "\n",
                     ReadTimeout = SerialPort.InfiniteTimeout,
                     WriteTimeout = 1000,
-                    DtrEnable = true,
-                    RtsEnable = true,
+                    // DtrEnable / RtsEnable intentionally left at their default
+                    // (false). Asserting and then de-asserting these lines on
+                    // open/close was wedging the ESP32-S3 firmware's render
+                    // loop on bridge stop. If a future board genuinely needs
+                    // hardware flow control, expose this as a config option.
+                    DtrEnable = false,
+                    RtsEnable = false,
                 };
                 _port.Open();
                 return true;

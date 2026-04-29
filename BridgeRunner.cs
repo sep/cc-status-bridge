@@ -25,6 +25,7 @@ public sealed class BridgeRunner
     private int _lastEmittedTasksCompleted = -1;
     private string? _lastEmittedClientSlot;
     private DateTimeOffset _lastToolActivity = DateTimeOffset.Now;
+    private DateTimeOffset _lastStateChange = DateTimeOffset.Now;
     private string? _currentSessionId;
 
     public BridgeRunner(BridgeOptions options, BrokerClient broker, SerialOutput serial)
@@ -228,6 +229,7 @@ public sealed class BridgeRunner
                 await Task.Delay(1000, ct);
                 lock (_lock)
                 {
+                    // working -> thinking after ThinkingIdleMs of no tool activity
                     if (_currentState == StateMapper.StateWorking)
                     {
                         var idle = (DateTimeOffset.Now - _lastToolActivity).TotalMilliseconds;
@@ -235,6 +237,18 @@ public sealed class BridgeRunner
                         {
                             SetStateLocked(StateMapper.StateThinking);
                             EmitSnapshotIfChangedLocked("thinking-heuristic", null);
+                        }
+                    }
+                    // thinking -> idle after InterruptIdleMs of being stuck.
+                    // Pure ESC-during-thinking interrupts fire no hook event,
+                    // so without this we'd display "thinking" forever.
+                    else if (_currentState == StateMapper.StateThinking)
+                    {
+                        var stuckFor = (DateTimeOffset.Now - _lastStateChange).TotalMilliseconds;
+                        if (stuckFor > _options.InterruptIdleMs)
+                        {
+                            SetStateLocked(StateMapper.StateIdle);
+                            EmitSnapshotIfChangedLocked("interrupt-heuristic", null);
                         }
                     }
                 }
@@ -247,6 +261,7 @@ public sealed class BridgeRunner
     {
         if (newState == _currentState) return;
         _currentState = newState;
+        _lastStateChange = DateTimeOffset.Now;
         if (newState == StateMapper.StateWorking)
             _lastToolActivity = DateTimeOffset.Now;
     }

@@ -188,6 +188,33 @@ lets a single serial bus theoretically address multiple ESPs in the
 future without each one crashing on foreign traffic — though v1.2
 firmware is still 1-ESP-per-COM-port.
 
+### Default slot policy (v1.3)
+
+The bridge guarantees one of the following holds for every state line
+it emits:
+
+- The line carries an explicit `client` field whose slot this firmware
+  owns, OR
+- The line has no `client` field at all, in which case the firmware
+  MUST render it on its lowest-ID full-panel slot (i.e., `first_id`,
+  typically `"1"`).
+
+This formalizes the existing legacy-line behavior in §3 above. It's
+load-bearing for the new "no route = default slot 1" policy on the
+host: a brand-new user with the plugin installed and the bridge
+running but no `/claude-status:show` invoked yet will still see their
+session light up the first panel.
+
+### Multi-session traffic
+
+Starting with bridge v0.2.0, the host fans out **multiple Claude Code
+sessions** to multiple client slots **simultaneously**. The firmware
+already supports this via §3.1 (each client slot has independent state
+and rendering); the new contract is that the bridge will be sending
+interleaved state lines for several `client` values within the same
+serial stream. The firmware's per-client mutex / dispatcher logic
+already covers this — no changes needed beyond what §3.1 demands.
+
 ### Panel layout
 
 Multi-panel setups use a compile-time default of `panel_count=1`,
@@ -197,7 +224,7 @@ the panel while waiting for the bridge to reconnect.
 
 ---
 
-## 4. State lexicon (v1.2)
+## 4. State lexicon (v1.3)
 
 | `state` value  | Meaning                                                 |
 |----------------|---------------------------------------------------------|
@@ -399,12 +426,13 @@ layout.
 
 ---
 
-## 8. Bidirectional protocol extension (v1.2)
+## 8. Bidirectional protocol extension (v1.3)
 
 The v1.0 contract (§3) was unidirectional host→device. v1.1 added
-PING/PONG and RESYNC for liveness observability. v1.2 adds runtime
-panel configuration and a user-facing identify command, and generalizes
-the PONG shape to report multiple client slots.
+PING/PONG and RESYNC for liveness observability. v1.2 added runtime
+panel configuration and a user-facing identify command, and generalized
+the PONG shape to report multiple client slots. v1.3 adds the `hint`
+command for transient cross-session UX overlays.
 
 All of this is **additive** — a v1.0 firmware that ignores unknown
 fields remains functional, it just won't answer pings, can't be
@@ -423,6 +451,8 @@ On every incoming line, parse JSON then dispatch by `type`:
 | `"identify"`        | Briefly render this ESP's panel IDs and resume (see       |
 |                     | below).                                                   |
 | `"configure"`       | Apply new panel layout at runtime, ack with `configured`. |
+| `"hint"`            | Render a transient overlay on the named client slot       |
+|                     | (see "Hints" below). v1.3.                                |
 | *(missing)*         | Legacy fallback: if a `state` field is present, treat as  |
 |                     | a v1 state update targeting the default client. Otherwise |
 |                     | ignore the line.                                          |
@@ -465,6 +495,36 @@ which after rearranging cables:
   window are applied to the snapshot but not rendered until identify
   ends.
 - Bridge typically emits identify only on explicit user request.
+
+**HINT** — host annotates a client slot with a transient warning
+overlay. Used for cross-session UX hints that the firmware can render
+without affecting the underlying client's normal state rendering.
+
+```json
+{"type":"hint","client":"1","kind":"collision","sessions":2}
+```
+
+Required fields: `type`, `client`, `kind`. `kind` values defined in v1.3:
+
+| `kind`        | Semantics                                                       |
+|---------------|-----------------------------------------------------------------|
+| `"collision"` | More than one Claude session is currently routed to this slot. |
+|               | Includes a `sessions` integer: how many sessions are active     |
+|               | here. Suggested rendering: a small "⚠ N" badge in a corner of   |
+|               | the slot, or a barber-pole stripe along one edge — anything     |
+|               | visually unambiguous as "this slot is contested, please         |
+|               | route one of them away."                                        |
+| *(other)*     | Reserved. Firmware MUST ignore unknown `kind` values rather     |
+|               | than crash.                                                     |
+
+The bridge re-emits the same `hint` periodically (every few seconds)
+while the condition persists, so a missed line during a reboot or
+buffer overrun is self-healing. When the underlying condition resolves
+(e.g., a session is routed away or goes idle), the bridge stops
+emitting hints; the firmware should clear the overlay after roughly
+twice the bridge's emit interval if no fresh hint arrives — i.e., on
+the order of 5–10 seconds of silence. Underlying state rendering
+continues unaffected throughout.
 
 **CONFIGURE** — host reconfigures the panel layout at runtime:
 

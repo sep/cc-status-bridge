@@ -32,6 +32,60 @@ public sealed class BridgeRunner
     // Collision tracking: when a hint was last sent for a given slot.
     private readonly Dictionary<string, DateTimeOffset> _lastCollisionHint = new();
 
+    // ============================================================
+    // Aggregate state — exposed to the tray UI for icon coloring.
+    // ============================================================
+
+    /// <summary>
+    /// Fires whenever the "loudest" state across all subscribed sessions
+    /// changes. Argument is one of: "error", "blocked", "compacting",
+    /// "working", "thinking", "idle", or "(none)" if no session has any
+    /// state yet (or all sessions are gone).
+    /// </summary>
+    public event Action<string>? AggregateStateChanged;
+
+    private string _lastAggregate = "(none)";
+
+    private void RaiseAggregateStateLocked()
+    {
+        var aggregate = ComputeAggregateLocked();
+        if (aggregate == _lastAggregate) return;
+        _lastAggregate = aggregate;
+        var handler = AggregateStateChanged;
+        if (handler is not null) Task.Run(() => handler(aggregate));
+    }
+
+    private string ComputeAggregateLocked()
+    {
+        // Loudest first: error > blocked > compacting > working > thinking > idle
+        var bits = 0;
+        const int B_ERROR      = 1 << 5;
+        const int B_BLOCKED    = 1 << 4;
+        const int B_COMPACTING = 1 << 3;
+        const int B_WORKING    = 1 << 2;
+        const int B_THINKING   = 1 << 1;
+        const int B_IDLE       = 1 << 0;
+        foreach (var session in _sessions.Values)
+        {
+            switch (session.CurrentState)
+            {
+                case "error":      bits |= B_ERROR; break;
+                case "blocked":    bits |= B_BLOCKED; break;
+                case "compacting": bits |= B_COMPACTING; break;
+                case "working":    bits |= B_WORKING; break;
+                case "thinking":   bits |= B_THINKING; break;
+                case "idle":       bits |= B_IDLE; break;
+            }
+        }
+        if ((bits & B_ERROR)      != 0) return "error";
+        if ((bits & B_BLOCKED)    != 0) return "blocked";
+        if ((bits & B_COMPACTING) != 0) return "compacting";
+        if ((bits & B_WORKING)    != 0) return "working";
+        if ((bits & B_THINKING)   != 0) return "thinking";
+        if ((bits & B_IDLE)       != 0) return "idle";
+        return "(none)";
+    }
+
     public BridgeRunner(BridgeOptions options, BrokerClient broker, SerialOutput serial)
     {
         _options = options;
@@ -268,6 +322,8 @@ public sealed class BridgeRunner
         // a batch ("5 done!" stuck on display until next prompt).
         if (newState == StateMapper.StateIdle && session.TasksActive == 0)
             session.Tasks.Clear();
+
+        RaiseAggregateStateLocked();
     }
 
     private void EmitSnapshotIfChangedLocked(SessionState session, string? eventName, JsonNode? ts)

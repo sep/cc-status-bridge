@@ -1,5 +1,6 @@
+using Avalonia;
+using Avalonia.Controls.ApplicationLifetimes;
 using ClaudeStatusBridge;
-using Microsoft.Extensions.Configuration;
 
 // On Windows, when we're launched without a parent console (scheduled
 // task), the OS allocates a console window for our process. Hide it so
@@ -7,8 +8,7 @@ using Microsoft.Extensions.Configuration;
 // shared with the parent and we leave it visible.
 ConsoleAttach.HideConsoleIfOwned();
 
-// Subcommand dispatch. Anything other than the defaults falls through to
-// running the bridge in the foreground.
+// CLI subcommand dispatch — these run synchronously and exit, no tray.
 if (args.Length > 0)
 {
     switch (args[0].ToLowerInvariant())
@@ -39,82 +39,33 @@ if (args.Length > 0)
     }
 }
 
-// Load config from BOTH the runtime base directory (the .NET host's
-// working dir, which for a single-file self-contained EXE may be a
-// temp extract path) AND the directory containing the actual binary,
-// since `bridge match` writes appsettings.json next to the binary.
-// Whichever has a real file wins; later sources override earlier ones.
-var binaryDir = Path.GetDirectoryName(Environment.ProcessPath ?? "")
-                ?? AppContext.BaseDirectory;
-var config = new ConfigurationBuilder()
-    .SetBasePath(AppContext.BaseDirectory)
-    .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
-    .AddJsonFile(Path.Combine(binaryDir, "appsettings.json"), optional: true, reloadOnChange: false)
-    .AddEnvironmentVariables(prefix: "CSB_")
-    .AddCommandLine(args)
-    .Build();
-
-// Foreground / service mode below this point. Take a single-instance lock
-// so multiple stray bridges can't pile up (even if the scheduler fires more
-// than one launch).
+// Default invocation: launch the Avalonia tray app. The bridge subscription
+// runs as a background Task owned by TrayHost; the tray icon and menu are
+// the entire user interface.
+//
+// We still take a single-instance lock so two stray bridges can't multiplex
+// to the same serial port if (e.g.) the scheduled task fires twice.
 using var singleInstance = SingleInstance.TryAcquire();
 if (singleInstance is null)
 {
-    Log.Warn("[bridge] another instance is already running; exiting");
+    // Another instance is already running. Quietly exit; if a user
+    // double-launched the EXE, the tray icon is still there from the
+    // first one.
     return 0;
 }
 
-var options = new BridgeOptions();
-config.GetSection("Bridge").Bind(options);
-
-var broker = new BrokerClient(options);
-
-var rootsPreview = string.Join(", ", broker.CandidateDataRoots().Take(4));
-Log.Info($"[bridge] data roots: {(string.IsNullOrEmpty(rootsPreview) ? "(none found)" : rootsPreview)}");
-Log.Info($"[bridge] com_port={options.ComPort} baud={options.BaudRate}");
-Log.Info($"[bridge] rescan_interval={options.RescanIntervalMs}ms thinking_idle={options.ThinkingIdleMs}ms");
-
-using var cts = new CancellationTokenSource();
-Console.CancelKeyPress += (_, e) =>
-{
-    e.Cancel = true;
-    if (!cts.IsCancellationRequested)
-    {
-        Log.Info("[bridge] shutdown requested, draining...");
-        cts.Cancel();
-    }
-};
-
-using var serial = new SerialOutput(options);
-
-var initialPin = broker.ReadPinnedSessionId();
-Log.Info(initialPin is null
-    ? "[bridge] pin: (none; auto-switching to newest session)"
-    : $"[bridge] pin: {ShortenPin(initialPin)} (auto-switching disabled)");
-
-var runner = new BridgeRunner(options, broker, serial);
-
-try
-{
-    await runner.RunAsync(cts.Token);
-}
-catch (OperationCanceledException)
-{
-    // expected on Ctrl+C
-}
-
-Log.Info("[bridge] exiting");
-return 0;
-
-static string ShortenPin(string id) => id.Length <= 8 ? id : id[..8];
+return TrayApp.BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
 
 static void PrintHelp()
 {
     Console.WriteLine(
         "ClaudeStatusBridge — transport for claude-status plugin\n" +
         "\n" +
+        "Default invocation launches a system-tray application. The tray\n" +
+        "icon is the entire UI; right-click for start/stop/logs/quit.\n" +
+        "\n" +
         "Usage:\n" +
-        "  ClaudeStatusBridge               Run in the foreground (dev mode)\n" +
+        "  ClaudeStatusBridge               Launch the tray app (default)\n" +
         "  ClaudeStatusBridge install       Register + start as a user-scope service\n" +
         "  ClaudeStatusBridge uninstall     Stop + deregister (idempotent)\n" +
         "  ClaudeStatusBridge start         Start the registered service\n" +

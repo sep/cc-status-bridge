@@ -83,6 +83,17 @@ internal static class Installer
         return 1;
     }
 
+    public static bool IsRegistered()
+    {
+        if (OperatingSystem.IsWindows())
+            return RunQuiet("schtasks", "/Query", "/TN", ServiceName) == 0;
+        if (OperatingSystem.IsMacOS())
+            return File.Exists(MacPlistPath());
+        if (OperatingSystem.IsLinux())
+            return File.Exists(LinuxUnitPath());
+        return false;
+    }
+
     public static int Restart()
     {
         Stop();                          // ignore exit; may already be stopped

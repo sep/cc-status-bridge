@@ -3,10 +3,13 @@ using System.Text.Json.Nodes;
 namespace ClaudeStatusBridge;
 
 /// <summary>
-/// Owns the bridge's state machine: subscribes to the broker, interprets
-/// lifecycle events into a small rendered-state lexicon plus a subagent
-/// counter, and writes state snapshots to the serial port. One instance
-/// per process.
+/// Owns the bridge's state machine and serial output. Subscribes to one
+/// or more Claude session brokers, interprets lifecycle events into a
+/// rendered-state lexicon plus per-session counters, and writes
+/// snapshots to the serial port. State is now keyed by session_id in a
+/// dictionary, so the multi-session subscription manager (next phase)
+/// can fan out N concurrent sessions to N display slots without any
+/// further structural changes here.
 /// </summary>
 public sealed class BridgeRunner
 {
@@ -15,18 +18,17 @@ public sealed class BridgeRunner
     private readonly SerialOutput _serial;
 
     private readonly object _lock = new();
-    private string? _currentState;
-    private string? _preCompactState;
-    private int _subagentCount;
-    private readonly Dictionary<string, string> _tasks = new();
-    private string? _lastEmittedState;
-    private int _lastEmittedSubagentCount = -1;
-    private int _lastEmittedTasksActive = -1;
-    private int _lastEmittedTasksCompleted = -1;
-    private string? _lastEmittedClientSlot;
-    private DateTimeOffset _lastToolActivity = DateTimeOffset.Now;
-    private DateTimeOffset _lastStateChange = DateTimeOffset.Now;
+
+    /// <summary>
+    /// Per-session state, keyed by session_id. While the bridge is
+    /// single-subscribe (pre-Phase-3) this dictionary has at most one
+    /// entry; after Phase 3 it holds an entry per concurrently-subscribed
+    /// session.
+    /// </summary>
+    private readonly Dictionary<string, SessionState> _sessions = new();
+
     private string? _currentSessionId;
+    private string? _lastConfiguredJson;
 
     public BridgeRunner(BridgeOptions options, BrokerClient broker, SerialOutput serial)
     {
@@ -38,7 +40,7 @@ public sealed class BridgeRunner
     public async Task RunAsync(CancellationToken ct)
     {
         var thinkingTicker = Task.Run(() => ThinkingTickerAsync(ct), ct);
-        var serialMonitor = Task.Run(() => SerialMonitorAsync(ct), ct);
+        var serialMonitor  = Task.Run(() => SerialMonitorAsync(ct), ct);
         try
         {
             await SubscriptionLoopAsync(ct);
@@ -46,9 +48,13 @@ public sealed class BridgeRunner
         finally
         {
             try { await thinkingTicker; } catch { }
-            try { await serialMonitor; } catch { }
+            try { await serialMonitor; }  catch { }
         }
     }
+
+    // ============================================================
+    // Subscription loop (single-subscribe; Phase 3 replaces this)
+    // ============================================================
 
     private async Task SubscriptionLoopAsync(CancellationToken ct)
     {
@@ -56,8 +62,11 @@ public sealed class BridgeRunner
 
         while (!ct.IsCancellationRequested)
         {
+            var serialWasOpen = _serial.IsOpen;
             if (!_serial.IsOpen && !_serial.TryOpen())
                 await SafeDelay(_options.SerialReopenDelayMs, ct);
+            if (!serialWasOpen && _serial.IsOpen)
+                lock (_lock) { SendConfigureIfChangedLocked(); }
 
             var endpoint = _broker.PickEndpoint();
             if (endpoint is null)
@@ -77,7 +86,7 @@ public sealed class BridgeRunner
             lastEmptyReason = null;
 
             Log.Info($"[bridge] subscribing to session {Shorten(endpoint.SessionId)} on port {endpoint.Port}");
-            ResetSessionStateLocked(endpoint.SessionId);
+            SwitchActiveSessionLocked(endpoint.SessionId);
 
             using var subCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             var watchdog = StartSubscriptionWatchdog(endpoint, subCts);
@@ -85,9 +94,7 @@ public sealed class BridgeRunner
             try
             {
                 await foreach (var rawLine in _broker.StreamEvents(endpoint, subCts.Token))
-                {
                     HandleEvent(rawLine);
-                }
                 if (!ct.IsCancellationRequested && !subCts.IsCancellationRequested)
                     Log.Info("[bridge] subscription ended");
             }
@@ -110,78 +117,173 @@ public sealed class BridgeRunner
         }
     }
 
-    private void ResetSessionStateLocked(string sessionId)
+    private void SwitchActiveSessionLocked(string sessionId)
     {
         lock (_lock)
         {
-            if (sessionId == _currentSessionId) return;
+            if (_currentSessionId == sessionId) return;
             _currentSessionId = sessionId;
-            _subagentCount = 0;
-            _tasks.Clear();
-            _preCompactState = null;
-            // Don't reset _currentState — let the next event (or replay) set it.
+            // Drop stale per-session state for sessions we are no longer
+            // subscribed to (single-subscribe assumption; Phase 3 keeps
+            // entries for all concurrently-subscribed sessions).
+            var stale = _sessions.Keys.Where(k => k != sessionId).ToList();
+            foreach (var s in stale) _sessions.Remove(s);
+            // Ensure the freshly-active session has its own state entry.
+            _ = SessionFor(sessionId);
         }
     }
 
-    private int TasksActive =>
-        _tasks.Values.Count(s => s == "pending" || s == "in_progress");
+    private SessionState SessionFor(string sessionId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var s))
+        {
+            s = new SessionState(sessionId);
+            _sessions[sessionId] = s;
+        }
+        return s;
+    }
 
-    private int TasksCompleted =>
-        _tasks.Values.Count(s => s == "completed");
+    // ============================================================
+    // Event handling
+    // ============================================================
 
     private void HandleEvent(string rawLine)
     {
         var parsed = StateMapper.Parse(rawLine);
         if (parsed is null) return;
 
+        // Use the raw line's session, not _currentSessionId, so when
+        // Phase 3 multi-subscribes we route events to the correct
+        // SessionState without further changes.
+        JsonNode? rawNode = null;
+        try { rawNode = JsonNode.Parse(rawLine); } catch { /* tolerated */ }
+        var eventSessionId = rawNode?["session_id"]?.GetValue<string>() ?? _currentSessionId;
+        if (eventSessionId is null) return;
+
         lock (_lock)
         {
+            // Re-check panel layout on every event so /claude-status:configure
+            // takes effect immediately, not only on next serial reconnect.
+            SendConfigureIfChangedLocked();
+
+            // Forward any one-shot firmware command (e.g. identify) verbatim.
+            if (parsed.FirmwareCommand is not null)
+                ForwardFirmwareCommandLocked(parsed.FirmwareCommand);
+
+            var session = SessionFor(eventSessionId);
+
             // --- subagent counter ---
-            // Claude Code's subagent-spawning tool is named "Agent" on the
-            // wire (not "Task" as one might guess from the user-facing term).
             if (parsed.EventName == "PreToolUse" && parsed.ToolName == "Agent")
-                _subagentCount++;
+                session.SubagentCount++;
             else if (parsed.EventName == "SubagentStop")
-                _subagentCount = Math.Max(0, _subagentCount - 1);
+                session.SubagentCount = Math.Max(0, session.SubagentCount - 1);
 
             // --- task counter ---
             if (parsed.TaskId is not null && parsed.TaskStatus is not null)
             {
                 if (parsed.TaskStatus == "deleted")
-                    _tasks.Remove(parsed.TaskId);
+                    session.Tasks.Remove(parsed.TaskId);
                 else
-                    _tasks[parsed.TaskId] = parsed.TaskStatus;
+                    session.Tasks[parsed.TaskId] = parsed.TaskStatus;
             }
 
             // --- state transitions ---
             if (parsed.IsToolActivity)
             {
-                _lastToolActivity = DateTimeOffset.Now;
-                if (_currentState != StateMapper.StateWorking)
-                    SetStateLocked(StateMapper.StateWorking);
+                session.LastToolActivity = DateTimeOffset.Now;
+                if (session.CurrentState != StateMapper.StateWorking)
+                    SetStateLocked(session, StateMapper.StateWorking);
             }
 
             if (parsed.State is not null)
             {
                 if (parsed.EventName == "PreCompact")
-                    _preCompactState = _currentState;
-                SetStateLocked(parsed.State);
+                    session.PreCompactState = session.CurrentState;
+                SetStateLocked(session, parsed.State);
             }
             else if (parsed.EventName == "PostCompact")
             {
-                var restore = _preCompactState ?? StateMapper.StateWorking;
-                _preCompactState = null;
-                SetStateLocked(restore);
+                var restore = session.PreCompactState ?? StateMapper.StateWorking;
+                session.PreCompactState = null;
+                SetStateLocked(session, restore);
             }
 
-            EmitSnapshotIfChangedLocked(parsed.EventName, parsed.Ts);
+            EmitSnapshotIfChangedLocked(session, parsed.EventName, parsed.Ts);
         }
     }
+
+    private void ForwardFirmwareCommandLocked(JsonNode cmd)
+    {
+        var cmdJson = cmd.ToJsonString();
+        if (!_serial.IsOpen) _serial.TryOpen();
+        if (_serial.WriteLine(cmdJson))
+            Log.Info($"[bridge] fw-cmd -> {cmdJson}");
+        else
+            Log.Warn($"[bridge] fw-cmd dropped (serial closed): {cmdJson}");
+    }
+
+    private void SetStateLocked(SessionState session, string newState)
+    {
+        if (newState == session.CurrentState) return;
+        session.CurrentState = newState;
+        session.LastStateChange = DateTimeOffset.Now;
+        if (newState == StateMapper.StateWorking)
+            session.LastToolActivity = DateTimeOffset.Now;
+
+        // Task-list "graduation" — when a session goes idle and has no
+        // active tasks, clear the completed counter too. Otherwise
+        // tasks_completed would linger forever after a session finishes
+        // a batch ("5 done!" stuck on display until next prompt).
+        if (newState == StateMapper.StateIdle && session.TasksActive == 0)
+            session.Tasks.Clear();
+    }
+
+    private void EmitSnapshotIfChangedLocked(SessionState session, string? eventName, JsonNode? ts)
+    {
+        if (session.CurrentState is null) return;
+        var tasksActive    = session.TasksActive;
+        var tasksCompleted = session.TasksCompleted;
+        // Re-read route on each emit so /claude-status:show changes
+        // take effect at the next snapshot without a bridge restart.
+        var clientSlot = _broker.ReadRouteForSession(session.SessionId);
+
+        if (session.CurrentState == session.LastEmittedState
+            && session.SubagentCount == session.LastEmittedSubagentCount
+            && tasksActive == session.LastEmittedTasksActive
+            && tasksCompleted == session.LastEmittedTasksCompleted
+            && clientSlot == session.LastEmittedClientSlot)
+            return;
+
+        var line = StateMapper.BuildDeviceLine(
+            session.CurrentState, clientSlot, session.SubagentCount,
+            tasksActive, tasksCompleted, eventName, ts);
+        if (!_serial.IsOpen) _serial.TryOpen();
+        if (_serial.WriteLine(line))
+        {
+            Log.Info($"[bridge] -> {line}");
+            session.LastEmit = DateTimeOffset.Now;
+        }
+        else
+        {
+            Log.Warn($"[bridge] dropped (serial closed): {line}");
+        }
+
+        session.LastEmittedState           = session.CurrentState;
+        session.LastEmittedSubagentCount   = session.SubagentCount;
+        session.LastEmittedTasksActive     = tasksActive;
+        session.LastEmittedTasksCompleted  = tasksCompleted;
+        session.LastEmittedClientSlot      = clientSlot;
+    }
+
+    // ============================================================
+    // Serial monitoring
+    // ============================================================
 
     private async Task SerialMonitorAsync(CancellationToken ct)
     {
         var previouslyAvailable = _serial.IsDeviceAvailable();
         Log.Info($"[bridge] serial monitor: {_options.ComPort} initially {(previouslyAvailable ? "available" : "unavailable")}, polling every {_options.SerialPollIntervalMs}ms");
+        if (previouslyAvailable && _serial.IsOpen) lock (_lock) { SendConfigureIfChangedLocked(); }
         try
         {
             while (!ct.IsCancellationRequested)
@@ -194,7 +296,11 @@ public sealed class BridgeRunner
                     Log.Info($"[bridge] device on {_options.ComPort} appeared");
                     if (_serial.TryOpen())
                     {
-                        lock (_lock) ForceReemitCurrentStateLocked();
+                        lock (_lock)
+                        {
+                            SendConfigureIfChangedLocked();
+                            ForceReemitAllSessionsLocked();
+                        }
                     }
                 }
                 else if (!available && previouslyAvailable)
@@ -209,16 +315,50 @@ public sealed class BridgeRunner
         catch (OperationCanceledException) { }
     }
 
-    private void ForceReemitCurrentStateLocked()
+    private void ForceReemitAllSessionsLocked()
     {
-        if (_currentState is null) return;
-        _lastEmittedState = null;
-        _lastEmittedSubagentCount = -1;
-        _lastEmittedTasksActive = -1;
-        _lastEmittedTasksCompleted = -1;
-        _lastEmittedClientSlot = null;
-        EmitSnapshotIfChangedLocked("device-reconnected", null);
+        foreach (var session in _sessions.Values)
+        {
+            if (session.CurrentState is null) continue;
+            session.InvalidateLastEmit();
+            EmitSnapshotIfChangedLocked(session, "device-reconnected", null);
+        }
     }
+
+    // ============================================================
+    // Configure pass-through (panel_layout.json -> firmware)
+    // ============================================================
+
+    private void SendConfigureIfChangedLocked()
+    {
+        var layout = _broker.ReadPanelLayout();
+        if (layout is null) return;
+        var doc = new JsonObject
+        {
+            ["type"]         = "configure",
+            ["panel_count"]  = layout.PanelCount,
+            ["panel_width"]  = layout.PanelWidth,
+            ["panel_height"] = layout.PanelHeight,
+            ["layout"]       = layout.Layout,
+            ["first_id"]     = layout.FirstId,
+        };
+        var json = doc.ToJsonString();
+        if (json == _lastConfiguredJson) return;
+        if (!_serial.IsOpen) _serial.TryOpen();
+        if (_serial.WriteLine(json))
+        {
+            Log.Info($"[bridge] configure -> {json}");
+            _lastConfiguredJson = json;
+        }
+        else
+        {
+            Log.Warn($"[bridge] configure dropped (serial closed): {json}");
+        }
+    }
+
+    // ============================================================
+    // Thinking + interrupt heuristics
+    // ============================================================
 
     private async Task ThinkingTickerAsync(CancellationToken ct)
     {
@@ -229,26 +369,27 @@ public sealed class BridgeRunner
                 await Task.Delay(1000, ct);
                 lock (_lock)
                 {
-                    // working -> thinking after ThinkingIdleMs of no tool activity
-                    if (_currentState == StateMapper.StateWorking)
+                    foreach (var session in _sessions.Values)
                     {
-                        var idle = (DateTimeOffset.Now - _lastToolActivity).TotalMilliseconds;
-                        if (idle > _options.ThinkingIdleMs)
+                        // working -> thinking after ThinkingIdleMs of no tool activity
+                        if (session.CurrentState == StateMapper.StateWorking)
                         {
-                            SetStateLocked(StateMapper.StateThinking);
-                            EmitSnapshotIfChangedLocked("thinking-heuristic", null);
+                            var idle = (DateTimeOffset.Now - session.LastToolActivity).TotalMilliseconds;
+                            if (idle > _options.ThinkingIdleMs)
+                            {
+                                SetStateLocked(session, StateMapper.StateThinking);
+                                EmitSnapshotIfChangedLocked(session, "thinking-heuristic", null);
+                            }
                         }
-                    }
-                    // thinking -> idle after InterruptIdleMs of being stuck.
-                    // Pure ESC-during-thinking interrupts fire no hook event,
-                    // so without this we'd display "thinking" forever.
-                    else if (_currentState == StateMapper.StateThinking)
-                    {
-                        var stuckFor = (DateTimeOffset.Now - _lastStateChange).TotalMilliseconds;
-                        if (stuckFor > _options.InterruptIdleMs)
+                        // thinking -> idle after InterruptIdleMs of being stuck
+                        else if (session.CurrentState == StateMapper.StateThinking)
                         {
-                            SetStateLocked(StateMapper.StateIdle);
-                            EmitSnapshotIfChangedLocked("interrupt-heuristic", null);
+                            var stuckFor = (DateTimeOffset.Now - session.LastStateChange).TotalMilliseconds;
+                            if (stuckFor > _options.InterruptIdleMs)
+                            {
+                                SetStateLocked(session, StateMapper.StateIdle);
+                                EmitSnapshotIfChangedLocked(session, "interrupt-heuristic", null);
+                            }
                         }
                     }
                 }
@@ -257,47 +398,9 @@ public sealed class BridgeRunner
         catch (OperationCanceledException) { }
     }
 
-    private void SetStateLocked(string newState)
-    {
-        if (newState == _currentState) return;
-        _currentState = newState;
-        _lastStateChange = DateTimeOffset.Now;
-        if (newState == StateMapper.StateWorking)
-            _lastToolActivity = DateTimeOffset.Now;
-    }
-
-    private void EmitSnapshotIfChangedLocked(string? eventName, JsonNode? ts)
-    {
-        if (_currentState is null) return;
-        var tasksActive = TasksActive;
-        var tasksCompleted = TasksCompleted;
-        // Re-read route on each emit so /claude-status:route changes take
-        // effect at the next snapshot without a bridge restart.
-        var clientSlot = _currentSessionId is null
-            ? null
-            : _broker.ReadRouteForSession(_currentSessionId);
-
-        if (_currentState == _lastEmittedState
-            && _subagentCount == _lastEmittedSubagentCount
-            && tasksActive == _lastEmittedTasksActive
-            && tasksCompleted == _lastEmittedTasksCompleted
-            && clientSlot == _lastEmittedClientSlot)
-            return;
-
-        var line = StateMapper.BuildDeviceLine(
-            _currentState, clientSlot, _subagentCount, tasksActive, tasksCompleted, eventName, ts);
-        if (!_serial.IsOpen) _serial.TryOpen();
-        if (_serial.WriteLine(line))
-            Log.Info($"[bridge] -> {line}");
-        else
-            Log.Warn($"[bridge] dropped (serial closed): {line}");
-
-        _lastEmittedState = _currentState;
-        _lastEmittedSubagentCount = _subagentCount;
-        _lastEmittedTasksActive = tasksActive;
-        _lastEmittedTasksCompleted = tasksCompleted;
-        _lastEmittedClientSlot = clientSlot;
-    }
+    // ============================================================
+    // Subscription watchdog (single-subscribe only; replaced in Phase 3)
+    // ============================================================
 
     private Task StartSubscriptionWatchdog(
         BrokerClient.BrokerEndpoint current,
@@ -336,6 +439,10 @@ public sealed class BridgeRunner
             catch (OperationCanceledException) { }
         });
     }
+
+    // ============================================================
+    // Helpers
+    // ============================================================
 
     private static string Shorten(string id) =>
         id.Length <= 8 ? id : id[..8];

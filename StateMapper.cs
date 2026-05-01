@@ -19,7 +19,8 @@ public static class StateMapper
         JsonNode? Ts,
         bool IsToolActivity,
         string? TaskId,
-        string? TaskStatus);
+        string? TaskStatus,
+        JsonNode? FirmwareCommand);
 
     // Notification subtypes that mean Claude is genuinely waiting on the
     // user. Other subtypes (idle_prompt = AFK reminder, auth_success =
@@ -109,7 +110,12 @@ public static class StateMapper
             // metric signal by BridgeRunner.
         }
 
-        return new Mapped(state, eventName, toolName, ts, isToolActivity, taskId, taskStatus);
+        // Firmware-command pass-through: if emit.py injected one (currently
+        // for /claude-status:identify), let the bridge forward it verbatim.
+        var fwCommand = node["firmware_command"];
+
+        return new Mapped(state, eventName, toolName, ts, isToolActivity,
+                          taskId, taskStatus, fwCommand);
     }
 
     public static string BuildDeviceLine(

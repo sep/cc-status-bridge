@@ -125,6 +125,45 @@ public sealed class BrokerClient
     }
 
     /// <summary>
+    /// Panel layout written by the plugin's /claude-status:configure
+    /// slash-command handler. Bridge sends this to the firmware on every
+    /// successful serial connect (per FIRMWARE.md §8). Null when no
+    /// layout has been configured — firmware then uses its compile-time
+    /// default (single 64×32 panel).
+    /// </summary>
+    public sealed record PanelLayout(
+        int PanelCount,
+        int PanelWidth,
+        int PanelHeight,
+        string Layout,
+        int FirstId);
+
+    public PanelLayout? ReadPanelLayout()
+    {
+        foreach (var root in CandidateDataRoots())
+        {
+            var path = Path.Combine(root, "panel_layout.json");
+            if (!File.Exists(path)) continue;
+            try
+            {
+                var node = JsonNode.Parse(File.ReadAllText(path));
+                if (node is null) continue;
+                return new PanelLayout(
+                    PanelCount:  node["panel_count"]?.GetValue<int>() ?? 1,
+                    PanelWidth:  node["panel_width"]?.GetValue<int>() ?? 64,
+                    PanelHeight: node["panel_height"]?.GetValue<int>() ?? 32,
+                    Layout:      node["layout"]?.GetValue<string>() ?? "horizontal",
+                    FirstId:     node["first_id"]?.GetValue<int>() ?? 1);
+            }
+            catch
+            {
+                // malformed; try next candidate
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Look up the display client slot for a session, written by the
     /// plugin's /claude-status:route slash-command handler. Returns null
     /// if no route is configured for this session.

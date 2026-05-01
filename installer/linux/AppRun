@@ -1,0 +1,6 @@
+#!/bin/sh
+# AppImage entrypoint. $APPDIR is set by the AppImage runtime to the
+# extracted root of the squashfs. We exec the bridge binary so the
+# AppImage process becomes the bridge process (rather than wrapping it).
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/bin/ClaudeStatusBridge" "$@"

@@ -78,10 +78,72 @@ jobs:
           codesign --force --deep --sign - "$binary"
           codesign --verify --verbose "$binary"
 
-      - uses: actions/upload-artifact@v4
+      # ============================================================
+      # Wrap the raw binary in a platform-native installer so end users
+      # don't have to download an EXE + run shell commands. The raw
+      # binary is still uploaded too, for power users / CI consumers.
+      # ============================================================
+
+      - name: Build NSIS installer (Windows)
+        if: matrix.rid == 'win-x64'
+        shell: bash
+        run: |
+          choco install nsis -y --no-progress
+          version="$(tr -d '[:space:]' < version.txt)"
+          binary="$PWD/out/${{ matrix.rid }}/ClaudeStatusBridge-${{ matrix.rid }}${{ matrix.exe_suffix }}"
+          # makensis path on Windows runners
+          "/c/Program Files (x86)/NSIS/makensis.exe" \
+            "/DVERSION=${version}" "/DBINARY=${binary}" \
+            installer/windows/installer.nsi
+          ls -la installer/windows/
+
+      - name: Build .app bundle and .dmg (macOS)
+        if: startsWith(matrix.rid, 'osx-')
+        run: |
+          version="$(tr -d '[:space:]' < version.txt)"
+          binary="$PWD/out/${{ matrix.rid }}/ClaudeStatusBridge-${{ matrix.rid }}"
+          installer/macos/build-bundle.sh "${version}" "${{ matrix.rid }}" "${binary}"
+          ls -la *.dmg
+
+      - name: Build AppImage (Linux)
+        if: matrix.rid == 'linux-x64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+          version="$(tr -d '[:space:]' < version.txt)"
+          binary="$PWD/out/${{ matrix.rid }}/ClaudeStatusBridge-${{ matrix.rid }}"
+          installer/linux/build-appimage.sh "${version}" "${binary}"
+          ls -la *.AppImage
+
+      - name: Upload raw binary
+        uses: actions/upload-artifact@v4
         with:
           name: bridge-${{ matrix.rid }}
           path: out/${{ matrix.rid }}/ClaudeStatusBridge-${{ matrix.rid }}${{ matrix.exe_suffix }}
+          if-no-files-found: error
+
+      - name: Upload Windows installer
+        if: matrix.rid == 'win-x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.rid }}
+          path: installer/windows/ClaudePanelBridge-*-Setup.exe
+          if-no-files-found: error
+
+      - name: Upload macOS .dmg
+        if: startsWith(matrix.rid, 'osx-')
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.rid }}
+          path: ClaudePanelBridge-*-${{ matrix.rid }}.dmg
+          if-no-files-found: error
+
+      - name: Upload Linux AppImage
+        if: matrix.rid == 'linux-x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.rid }}
+          path: ClaudePanelBridge-*-x86_64.AppImage
           if-no-files-found: error
 
   release:
@@ -114,16 +176,40 @@ jobs:
           body: |
             ## Install
 
-            Pick the binary for your platform:
+            **Recommended — platform-native installers:**
 
-            | Platform     | File                                 |
-            |--------------|--------------------------------------|
-            | Windows x64  | `ClaudeStatusBridge-win-x64.exe`     |
-            | Linux x64    | `ClaudeStatusBridge-linux-x64`       |
-            | macOS Intel  | `ClaudeStatusBridge-osx-x64`         |
-            | macOS Apple Silicon | `ClaudeStatusBridge-osx-arm64` |
+            | Platform                 | Download                                              |
+            |--------------------------|-------------------------------------------------------|
+            | Windows x64              | `ClaudePanelBridge-*-Setup.exe`                       |
+            | macOS Apple Silicon      | `ClaudePanelBridge-*-osx-arm64.dmg`                   |
+            | macOS Intel              | `ClaudePanelBridge-*-osx-x64.dmg`                     |
+            | Linux x64                | `ClaudePanelBridge-*-x86_64.AppImage`                 |
 
-            **macOS only — clear the Gatekeeper quarantine before first run:**
+            - **Windows:** double-click the `*-Setup.exe`. Per-user install,
+              no admin needed. Installs to `%LOCALAPPDATA%`, registers in
+              Apps & Features, sets up the auto-launch task, drops a tray
+              icon. SmartScreen may warn "publisher not verified" on first
+              run; click "More info → Run anyway."
+            - **macOS:** open the `.dmg`, drag `ClaudePanelBridge.app` into
+              `Applications`, then double-click it. The app lives in your
+              menu bar (no Dock icon — it's a tray-only app).
+              First launch may need: System Settings → Privacy & Security
+              → "Open Anyway" because the bundle is ad-hoc signed but not
+              notarized.
+            - **Linux:** `chmod +x ClaudePanelBridge-*-x86_64.AppImage`
+              and run it. Tray icon may need a system-tray extension on
+              GNOME (KStatusNotifierItem / AppIndicator).
+
+            **For scripted installs / CI / power users — raw binaries:**
+
+            | Platform            | File                                  |
+            |---------------------|---------------------------------------|
+            | Windows x64         | `ClaudeStatusBridge-win-x64.exe`      |
+            | Linux x64           | `ClaudeStatusBridge-linux-x64`        |
+            | macOS Apple Silicon | `ClaudeStatusBridge-osx-arm64`        |
+            | macOS Intel         | `ClaudeStatusBridge-osx-x64`          |
+
+            On macOS the raw binary needs the quarantine cleared:
 
             ```bash
             chmod +x ClaudeStatusBridge-osx-arm64
@@ -131,22 +217,10 @@ jobs:
             ./ClaudeStatusBridge-osx-arm64 install
             ```
 
-            (Without the `xattr` step, macOS will refuse to launch the
-            binary when the launchd agent tries to start it. The binary is
-            ad-hoc signed but not notarized — full notarization requires a
-            paid Apple Developer cert and isn't worth it for a self-hosted
-            tool.)
-
-            **Linux / Windows:**
-
-            ```bash
-            chmod +x ClaudeStatusBridge-linux-x64   # Linux only
-            ./ClaudeStatusBridge-<rid> install
-            ```
-
             Verify file integrity against `SHA256SUMS.txt` if you want.
 
             ## Subcommands
 
             `install` / `uninstall` / `start` / `stop` / `restart` /
-            `status` / `version` / `logs` — see `--help` for details.
+            `status` / `version` / `logs` / `match` / `configure` —
+            see `--help` for details.

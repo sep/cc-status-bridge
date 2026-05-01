@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ClaudePanel Bridge
+GenericName=Claude Code Status Display Transport
+Comment=Bridge between Claude Code sessions and an external status panel
+Exec=ClaudeStatusBridge
+Icon=claudepanel-bridge
+Terminal=false
+Categories=Utility;Development;
+StartupNotify=false
+NoDisplay=false

@@ -27,8 +27,10 @@ public sealed class BridgeRunner
     /// </summary>
     private readonly Dictionary<string, SessionState> _sessions = new();
 
-    private string? _currentSessionId;
     private string? _lastConfiguredJson;
+
+    // Collision tracking: when a hint was last sent for a given slot.
+    private readonly Dictionary<string, DateTimeOffset> _lastCollisionHint = new();
 
     public BridgeRunner(BridgeOptions options, BrokerClient broker, SerialOutput serial)
     {
@@ -39,97 +41,129 @@ public sealed class BridgeRunner
 
     public async Task RunAsync(CancellationToken ct)
     {
-        var thinkingTicker = Task.Run(() => ThinkingTickerAsync(ct), ct);
-        var serialMonitor  = Task.Run(() => SerialMonitorAsync(ct), ct);
+        var thinkingTicker  = Task.Run(() => ThinkingTickerAsync(ct), ct);
+        var serialMonitor   = Task.Run(() => SerialMonitorAsync(ct), ct);
+        var collisionTicker = Task.Run(() => CollisionTickerAsync(ct), ct);
         try
         {
-            await SubscriptionLoopAsync(ct);
+            await SubscriptionManagerAsync(ct);
         }
         finally
         {
-            try { await thinkingTicker; } catch { }
-            try { await serialMonitor; }  catch { }
+            try { await thinkingTicker; }  catch { }
+            try { await serialMonitor; }   catch { }
+            try { await collisionTicker; } catch { }
         }
     }
 
     // ============================================================
-    // Subscription loop (single-subscribe; Phase 3 replaces this)
+    // Subscription manager (multi-session, v0.2.0)
+    //
+    // Discovers every Claude session that has an active broker, opens a
+    // SUB stream to each one, and routes their events through HandleEvent
+    // (which already keys per-session state by session_id). Sessions
+    // that the user has explicitly hidden via /claude-status:hide are
+    // skipped entirely. Sessions with no route get displayed at the
+    // firmware's default slot (FIRMWARE.md §3.2). Sessions with explicit
+    // routes get their `client` field set in the wire protocol.
     // ============================================================
 
-    private async Task SubscriptionLoopAsync(CancellationToken ct)
+    private sealed class ActiveSubscription
     {
-        string? lastEmptyReason = null;
+        public Task Task = null!;
+        public CancellationTokenSource Cts = null!;
+        public BrokerClient.BrokerEndpoint Endpoint = null!;
+    }
 
-        while (!ct.IsCancellationRequested)
+    private async Task SubscriptionManagerAsync(CancellationToken ct)
+    {
+        var subs = new Dictionary<string, ActiveSubscription>(StringComparer.Ordinal);
+        var loggedEmpty = false;
+        try
         {
-            var serialWasOpen = _serial.IsOpen;
-            if (!_serial.IsOpen && !_serial.TryOpen())
-                await SafeDelay(_options.SerialReopenDelayMs, ct);
-            if (!serialWasOpen && _serial.IsOpen)
-                lock (_lock) { SendConfigureIfChangedLocked(); }
-
-            var endpoint = _broker.PickEndpoint();
-            if (endpoint is null)
+            while (!ct.IsCancellationRequested)
             {
-                var pinned = _broker.ReadPinnedSessionId();
-                var reason = pinned is null
-                    ? "no broker found, scanning..."
-                    : $"pinned session {Shorten(pinned)} has no active broker, waiting...";
-                if (reason != lastEmptyReason)
+                // Make sure serial is open if the device is plugged in;
+                // configure / reemit happen in SerialMonitorAsync.
+                if (!_serial.IsOpen) _serial.TryOpen();
+
+                var endpoints = _broker.FindAllBrokers().ToList();
+                var hidden = _broker.ReadHiddenSessions();
+                var wanted = endpoints
+                    .Where(e => !hidden.Contains(e.SessionId))
+                    .ToList();
+                var wantedIds = new HashSet<string>(
+                    wanted.Select(e => e.SessionId), StringComparer.Ordinal);
+
+                if (wanted.Count == 0 && subs.Count == 0)
                 {
-                    Log.Info($"[bridge] {reason}");
-                    lastEmptyReason = reason;
+                    if (!loggedEmpty)
+                    {
+                        Log.Info("[bridge] no active sessions to subscribe to; waiting...");
+                        loggedEmpty = true;
+                    }
                 }
-                await SafeDelay(_options.ReconnectDelayMs, ct);
-                continue;
-            }
-            lastEmptyReason = null;
+                else
+                {
+                    loggedEmpty = false;
+                }
 
-            Log.Info($"[bridge] subscribing to session {Shorten(endpoint.SessionId)} on port {endpoint.Port}");
-            SwitchActiveSessionLocked(endpoint.SessionId);
+                // Add new subscriptions for sessions we don't yet have one for.
+                foreach (var endpoint in wanted)
+                {
+                    if (subs.ContainsKey(endpoint.SessionId)) continue;
+                    Log.Info($"[bridge] subscribing to session {Shorten(endpoint.SessionId)} on port {endpoint.Port}");
+                    var subCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    var task = Task.Run(() => SubscribeOneAsync(endpoint, subCts.Token), subCts.Token);
+                    subs[endpoint.SessionId] = new ActiveSubscription
+                    {
+                        Task = task, Cts = subCts, Endpoint = endpoint,
+                    };
+                }
 
-            using var subCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var watchdog = StartSubscriptionWatchdog(endpoint, subCts);
+                // Tear down subscriptions for sessions that vanished or were hidden.
+                var toRemove = subs.Keys.Where(k => !wantedIds.Contains(k)).ToList();
+                foreach (var id in toRemove)
+                {
+                    var entry = subs[id];
+                    Log.Info($"[bridge] unsubscribing from session {Shorten(id)}");
+                    subs.Remove(id);
+                    entry.Cts.Cancel();
+                    try { await entry.Task; } catch { }
+                    entry.Cts.Dispose();
+                    lock (_lock) _sessions.Remove(id);
+                }
 
-            try
-            {
-                await foreach (var rawLine in _broker.StreamEvents(endpoint, subCts.Token))
-                    HandleEvent(rawLine);
-                if (!ct.IsCancellationRequested && !subCts.IsCancellationRequested)
-                    Log.Info("[bridge] subscription ended");
+                await SafeDelay(_options.RescanIntervalMs, ct);
             }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        }
+        finally
+        {
+            // Clean shutdown: cancel every active subscription.
+            foreach (var (_, entry) in subs)
             {
-                // watchdog asked us to switch
+                try { entry.Cts.Cancel(); } catch { }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            foreach (var (_, entry) in subs)
             {
-                Log.Warn($"[bridge] broker error: {ex.Message}");
+                try { await entry.Task; } catch { }
+                try { entry.Cts.Dispose(); } catch { }
             }
-            finally
-            {
-                subCts.Cancel();
-                try { await watchdog; } catch { }
-            }
-
-            if (!ct.IsCancellationRequested)
-                await SafeDelay(_options.ReconnectDelayMs, ct);
         }
     }
 
-    private void SwitchActiveSessionLocked(string sessionId)
+    private async Task SubscribeOneAsync(
+        BrokerClient.BrokerEndpoint endpoint, CancellationToken ct)
     {
-        lock (_lock)
+        try
         {
-            if (_currentSessionId == sessionId) return;
-            _currentSessionId = sessionId;
-            // Drop stale per-session state for sessions we are no longer
-            // subscribed to (single-subscribe assumption; Phase 3 keeps
-            // entries for all concurrently-subscribed sessions).
-            var stale = _sessions.Keys.Where(k => k != sessionId).ToList();
-            foreach (var s in stale) _sessions.Remove(s);
-            // Ensure the freshly-active session has its own state entry.
-            _ = SessionFor(sessionId);
+            await foreach (var rawLine in _broker.StreamEvents(endpoint, ct))
+                HandleEvent(rawLine);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            Log.Warn($"[bridge] subscription error for {Shorten(endpoint.SessionId)}: {ex.Message}");
         }
     }
 
@@ -152,12 +186,10 @@ public sealed class BridgeRunner
         var parsed = StateMapper.Parse(rawLine);
         if (parsed is null) return;
 
-        // Use the raw line's session, not _currentSessionId, so when
-        // Phase 3 multi-subscribes we route events to the correct
-        // SessionState without further changes.
+        // Multi-subscribe: dispatch by the event's own session_id.
         JsonNode? rawNode = null;
         try { rawNode = JsonNode.Parse(rawLine); } catch { /* tolerated */ }
-        var eventSessionId = rawNode?["session_id"]?.GetValue<string>() ?? _currentSessionId;
+        var eventSessionId = rawNode?["session_id"]?.GetValue<string>();
         if (eventSessionId is null) return;
 
         lock (_lock)
@@ -399,45 +431,64 @@ public sealed class BridgeRunner
     }
 
     // ============================================================
-    // Subscription watchdog (single-subscribe only; replaced in Phase 3)
+    // Collision detection — emit a {"type":"hint","kind":"collision",...}
+    // to the firmware whenever > 1 active session resolves to the same
+    // slot. Active = LastEmit within the last `activeWindowMs`. Hint is
+    // re-emitted every `hintIntervalMs` while the condition persists;
+    // firmware decays its overlay after a few seconds of silence per
+    // FIRMWARE.md §8.
     // ============================================================
 
-    private Task StartSubscriptionWatchdog(
-        BrokerClient.BrokerEndpoint current,
-        CancellationTokenSource subCts)
+    private async Task CollisionTickerAsync(CancellationToken ct)
     {
-        var intervalMs = _options.RescanIntervalMs;
-        return Task.Run(async () =>
+        const int hintIntervalMs   = 3000;
+        const int activeWindowMs   = 30000;
+        try
         {
-            try
+            while (!ct.IsCancellationRequested)
             {
-                while (!subCts.IsCancellationRequested)
-                {
-                    await Task.Delay(intervalMs, subCts.Token);
-
-                    var pinned = _broker.ReadPinnedSessionId();
-                    if (pinned is not null)
-                    {
-                        if (pinned != current.SessionId)
-                        {
-                            Log.Info($"[bridge] pin points to {Shorten(pinned)}, switching");
-                            subCts.Cancel();
-                            return;
-                        }
-                        continue;
-                    }
-
-                    var latest = _broker.FindNewestBroker();
-                    if (latest is not null && latest.SessionId != current.SessionId)
-                    {
-                        Log.Info($"[bridge] newer session detected ({Shorten(latest.SessionId)}), switching");
-                        subCts.Cancel();
-                        return;
-                    }
-                }
+                await Task.Delay(hintIntervalMs, ct);
+                lock (_lock) CheckCollisionsLocked(activeWindowMs);
             }
-            catch (OperationCanceledException) { }
-        });
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private void CheckCollisionsLocked(int activeWindowMs)
+    {
+        var now = DateTimeOffset.Now;
+        var defaultSlot = (_broker.ReadPanelLayout()?.FirstId ?? 1).ToString();
+        var slotCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        foreach (var session in _sessions.Values)
+        {
+            if (session.CurrentState is null) continue;
+            if ((now - session.LastEmit).TotalMilliseconds > activeWindowMs) continue;
+
+            var slot = _broker.ReadRouteForSession(session.SessionId) ?? defaultSlot;
+            if (slot == "_hidden") continue;
+
+            slotCounts[slot] = slotCounts.GetValueOrDefault(slot) + 1;
+        }
+
+        foreach (var (slot, count) in slotCounts)
+        {
+            if (count <= 1) continue;
+            var hint = new JsonObject
+            {
+                ["type"]     = "hint",
+                ["client"]   = slot,
+                ["kind"]     = "collision",
+                ["sessions"] = count,
+            };
+            var json = hint.ToJsonString();
+            if (!_serial.IsOpen) _serial.TryOpen();
+            if (_serial.WriteLine(json))
+            {
+                _lastCollisionHint[slot] = now;
+                Log.Info($"[bridge] collision-hint -> {json}");
+            }
+        }
     }
 
     // ============================================================

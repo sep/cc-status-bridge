@@ -92,6 +92,59 @@ public sealed class BrokerClient
         return best;
     }
 
+    /// <summary>
+    /// Yields every active broker (every session_id with a current
+    /// broker.json) found across all candidate data roots, deduplicated
+    /// by session_id. Used by the v0.2.0 multi-session subscription
+    /// manager.
+    /// </summary>
+    public IEnumerable<BrokerEndpoint> FindAllBrokers()
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var root in CandidateDataRoots())
+        {
+            var sessionsDir = Path.Combine(root, "sessions");
+            if (!Directory.Exists(sessionsDir)) continue;
+            foreach (var sessionDir in Directory.EnumerateDirectories(sessionsDir))
+            {
+                var stateFile = Path.Combine(sessionDir, "broker.json");
+                if (!File.Exists(stateFile)) continue;
+                var endpoint = ReadEndpointFromStateFile(stateFile, sessionDir);
+                if (endpoint is null) continue;
+                if (!seen.Add(endpoint.SessionId)) continue;
+                yield return endpoint;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Set of session_ids the user has explicitly hidden via
+    /// /claude-status:hide. Encoded as routes.json entries with the
+    /// special slot value "_hidden".
+    /// </summary>
+    public HashSet<string> ReadHiddenSessions()
+    {
+        var hidden = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var root in CandidateDataRoots())
+        {
+            var routesFile = Path.Combine(root, "routes.json");
+            if (!File.Exists(routesFile)) continue;
+            try
+            {
+                if (JsonNode.Parse(File.ReadAllText(routesFile)) is JsonObject obj)
+                {
+                    foreach (var kvp in obj)
+                    {
+                        if (kvp.Value?.GetValue<string>() == "_hidden")
+                            hidden.Add(kvp.Key);
+                    }
+                }
+            }
+            catch { /* malformed; try next candidate */ }
+        }
+        return hidden;
+    }
+
     public BrokerEndpoint? FindBrokerForSession(string sessionId)
     {
         foreach (var root in CandidateDataRoots())

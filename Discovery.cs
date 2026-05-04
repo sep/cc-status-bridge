@@ -30,32 +30,7 @@ internal static class Discovery
         {
             return new List<string>();
         }
-
-        if (OperatingSystem.IsMacOS())
-        {
-            // /dev/tty.* blocks on DCD; /dev/cu.* doesn't. Always prefer cu.*
-            // for outbound writes, and skip bluetooth-incoming garbage.
-            return raw
-                .Where(p => p.StartsWith("/dev/cu.", StringComparison.Ordinal))
-                .Where(p => !p.Contains("Bluetooth", StringComparison.OrdinalIgnoreCase))
-                .OrderBy(p => p)
-                .ToList();
-        }
-        if (OperatingSystem.IsLinux())
-        {
-            // Most ESP32-S3 native USB devices show up as /dev/ttyACM*.
-            // Some classic USB-UART bridges (CP210x, CH340) show up as
-            // /dev/ttyUSB*. /dev/ttyS* are typically motherboard UARTs;
-            // skip them.
-            return raw
-                .Where(p =>
-                    p.StartsWith("/dev/ttyACM", StringComparison.Ordinal) ||
-                    p.StartsWith("/dev/ttyUSB", StringComparison.Ordinal))
-                .OrderBy(p => p)
-                .ToList();
-        }
-        // Windows: any COM* is fair game.
-        return raw.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList();
+        return Platform.Current.FilterSerialPorts(raw).ToList();
     }
 
     public static ProbeResult Probe(string portName, int baudRate, int timeoutMs = 600)

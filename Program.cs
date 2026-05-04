@@ -2,15 +2,15 @@ using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using ClaudeStatusBridge;
 
-// On Windows, when we're launched without a parent console (scheduled
-// task), the OS allocates a console window for our process. Hide it so
-// service runs are silent. When launched from pwsh / cmd, the console is
-// shared with the parent and we leave it visible.
-ConsoleAttach.HideConsoleIfOwned();
-
 // CLI subcommand dispatch — these run synchronously and exit, no tray.
+// Bridge is WinExe (Windows-subsystem), so the OS doesn't allocate a
+// console for us; on the CLI path we attach to the parent shell's
+// console so output flows through. The tray path leaves console state
+// alone — silent launch, no flash.
 if (args.Length > 0)
 {
+    ConsoleAttach.AttachToParentIfCli();
+
     switch (args[0].ToLowerInvariant())
     {
         case "install":   return Installer.Install();
@@ -18,7 +18,8 @@ if (args.Length > 0)
         case "start":     return Installer.Start();
         case "stop":      return Installer.Stop();
         case "restart":   return Installer.Restart();
-        case "match":     return Installer.Match(115200);
+        case "find":      return Installer.Find(115200);
+        case "match":     return Installer.Find(115200);  // legacy alias
         case "status":    return Installer.Status();
         case "logs":
             // bridge logs           — last 50 lines, then follow
@@ -64,6 +65,13 @@ static void PrintHelp()
         "Default invocation launches a system-tray application. The tray\n" +
         "icon is the entire UI; right-click for start/stop/logs/quit.\n" +
         "\n" +
+        "On Windows the binary is Windows-subsystem (no console), so when\n" +
+        "you invoke a subcommand from pwsh / cmd the shell does not block\n" +
+        "waiting for it. Output still works — we attach to the parent\n" +
+        "console — but it interleaves with the next prompt. For interactive\n" +
+        "subcommands (`find`), invoke via `Start-Process -Wait`:\n" +
+        "    Start-Process -Wait .\\ClaudeStatusBridge.exe -ArgumentList find\n" +
+        "\n" +
         "Usage:\n" +
         "  ClaudeStatusBridge               Launch the tray app (default)\n" +
         "  ClaudeStatusBridge install       Register + start as a user-scope service\n" +
@@ -71,8 +79,9 @@ static void PrintHelp()
         "  ClaudeStatusBridge start         Start the registered service\n" +
         "  ClaudeStatusBridge stop          Stop the running service (stays registered)\n" +
         "  ClaudeStatusBridge restart       Stop then start\n" +
-        "  ClaudeStatusBridge match         Scan USB serial ports for a ClaudePanel\n" +
+        "  ClaudeStatusBridge find          Scan USB serial ports for a ClaudePanel\n" +
         "                                   and write the chosen port to appsettings.json\n" +
+        "                                   (alias: `match`, kept for back-compat)\n" +
         "  ClaudeStatusBridge status        Show install / running / version\n" +
         "  ClaudeStatusBridge logs          Tail the bridge log (Ctrl+C to exit)\n" +
         "                                   --no-follow: print and exit\n" +
@@ -81,7 +90,7 @@ static void PrintHelp()
         "  ClaudeStatusBridge help          This message\n" +
         "\n" +
         "Per-user install mechanism by platform:\n" +
-        "  Windows: Scheduled Task (no admin)\n" +
+        "  Windows: HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\n" +
         "  macOS:   launchd LaunchAgent under ~/Library/LaunchAgents/\n" +
         "  Linux:   systemd --user unit under ~/.config/systemd/user/\n" +
         "\n" +

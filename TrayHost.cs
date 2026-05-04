@@ -31,6 +31,9 @@ internal static class TrayHost
     private static NativeMenuItem? _statusItem;
     private static NativeMenuItem? _pauseResumeItem;
     private static NativeMenuItem? _autoRunItem;
+    private static NativeMenuItem? _connectDeviceItem;
+    private static NativeMenu?     _connectDeviceMenu;
+    private static CancellationTokenSource? _scannerCts;
 
     public static void AttachTo(Application app, IClassicDesktopStyleApplicationLifetime desktop)
     {
@@ -64,6 +67,7 @@ internal static class TrayHost
 
         StartBridge();
         RefreshAutoRunCheck();
+        StartScanner();
     }
 
     // ============================================================
@@ -73,10 +77,11 @@ internal static class TrayHost
     private static NativeMenu BuildMenuRoot()
     {
         var menu = new NativeMenu();
-        if (_statusItem is not null)       menu.Add(_statusItem);
-        if (_pauseResumeItem is not null)  menu.Add(_pauseResumeItem);
+        if (_statusItem is not null)        menu.Add(_statusItem);
+        if (_pauseResumeItem is not null)   menu.Add(_pauseResumeItem);
         menu.Add(new NativeMenuItemSeparator());
-        if (_autoRunItem is not null)      menu.Add(_autoRunItem);
+        if (_connectDeviceItem is not null) menu.Add(_connectDeviceItem);
+        if (_autoRunItem is not null)       menu.Add(_autoRunItem);
         var showLogs = new NativeMenuItem("Show logs");
         showLogs.Click += (_, _) => OpenLogsWindow();
         menu.Add(showLogs);
@@ -97,6 +102,10 @@ internal static class TrayHost
             ToggleType = NativeMenuItemToggleType.CheckBox,
         };
         _autoRunItem.Click += (_, _) => ToggleAutoRun();
+
+        _connectDeviceMenu = new NativeMenu();
+        _connectDeviceMenu.Add(new NativeMenuItem("Scanning…") { IsEnabled = false });
+        _connectDeviceItem = new NativeMenuItem("Connect device") { Menu = _connectDeviceMenu };
     }
 
     // ============================================================
@@ -214,12 +223,127 @@ internal static class TrayHost
     }
 
     // ============================================================
+    // Connect device (background scanner + submenu + port swap)
+    // ============================================================
+
+    private static void StartScanner()
+    {
+        _scannerCts = new CancellationTokenSource();
+        _ = Task.Run(() => ScannerLoopAsync(_scannerCts.Token));
+    }
+
+    private static async Task ScannerLoopAsync(CancellationToken ct)
+    {
+        // First scan eager (within a couple seconds of tray launch); then
+        // every 30s. Probe is ~600ms per port and the user rarely changes
+        // hardware mid-session, so a slow background tick is fine.
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var results = await Task.Run(ScanPorts, ct);
+                Dispatcher.UIThread.Post(() => UpdateConnectDeviceMenu(results));
+            }
+            catch (OperationCanceledException) { break; }
+            catch { /* swallow; we'll try again on the next tick */ }
+
+            try { await Task.Delay(TimeSpan.FromSeconds(30), ct); }
+            catch (OperationCanceledException) { break; }
+        }
+    }
+
+    private static List<Discovery.ProbeResult> ScanPorts()
+    {
+        var ports = Discovery.EnumeratePorts();
+        var activePort = _options?.ComPort;
+        var baud = _options?.BaudRate ?? 115200;
+        var results = new List<Discovery.ProbeResult>();
+        foreach (var p in ports)
+        {
+            // Skip the active port — bridge is holding it open and a probe
+            // would race for the handle. Surface it as the current selection
+            // so the user sees it in the submenu.
+            if (string.Equals(p, activePort, StringComparison.OrdinalIgnoreCase))
+            {
+                results.Add(new Discovery.ProbeResult(p, true, "active"));
+                continue;
+            }
+            results.Add(Discovery.Probe(p, baud));
+        }
+        return results;
+    }
+
+    private static void UpdateConnectDeviceMenu(List<Discovery.ProbeResult> results)
+    {
+        if (_connectDeviceMenu is null) return;
+        _connectDeviceMenu.Items.Clear();
+
+        var matches = results.Where(r => r.IsClaudePanel).ToList();
+        if (matches.Count == 0)
+        {
+            _connectDeviceMenu.Items.Add(
+                new NativeMenuItem("(no ClaudePanel detected — plug it in?)") { IsEnabled = false });
+            return;
+        }
+
+        var activePort = _options?.ComPort;
+        foreach (var r in matches)
+        {
+            var item = new NativeMenuItem($"{r.Port} — {r.Detail}")
+            {
+                ToggleType = NativeMenuItemToggleType.CheckBox,
+                IsChecked  = string.Equals(r.Port, activePort, StringComparison.OrdinalIgnoreCase),
+            };
+            var port = r.Port;
+            item.Click += (_, _) => _ = Task.Run(() => ChangeComPortAsync(port));
+            _connectDeviceMenu.Items.Add(item);
+        }
+    }
+
+    private static async Task ChangeComPortAsync(string newPort)
+    {
+        if (_options is null) return;
+        if (string.Equals(newPort, _options.ComPort, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        // Tear the runner down and wait for it to actually stop, so the
+        // serial handle is released before we reopen against the new port.
+        var cts = _runnerCts;
+        var task = _runnerTask;
+        var runner = _runner;
+        _runner = null;
+        _runnerCts = null;
+        _runnerTask = null;
+        try { cts?.Cancel(); } catch { }
+        try { if (task is not null) await task; } catch { }
+        try { if (runner is not null) runner.AggregateStateChanged -= OnAggregateStateChanged; } catch { }
+        try { cts?.Dispose(); } catch { }
+
+        // Persist + update in-memory options.
+        if (!Installer.TryWriteComPortConfig(newPort, out _, out var err))
+        {
+            Dispatcher.UIThread.Post(() => UpdateStatusLabel($"Status: failed to save port ({err})"));
+            return;
+        }
+        _options.ComPort = newPort;
+
+        // Recreate SerialOutput against the updated options. SerialOutput
+        // re-reads ComPort lazily on each open, so a fresh instance picks
+        // up the new value on its next reconnect attempt.
+        try { _serial?.Dispose(); } catch { }
+        _serial = new SerialOutput(_options);
+
+        Dispatcher.UIThread.Post(StartBridge);
+    }
+
+    // ============================================================
     // Quit
     // ============================================================
 
     private static void Quit()
     {
-        // Best-effort: stop the bridge, then shutdown Avalonia.
+        // Best-effort: stop the scanner + bridge, then shutdown Avalonia.
+        try { _scannerCts?.Cancel(); } catch { }
         try { _runnerCts?.Cancel(); } catch { }
         try { _serial?.Dispose(); } catch { }
         Dispatcher.UIThread.Post(() => _desktop?.Shutdown());

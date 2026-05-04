@@ -20,7 +20,7 @@ internal sealed class SingleInstance : IDisposable
 
     public static SingleInstance? TryAcquire()
     {
-        var dir = ResolveLockDir();
+        var dir = Platform.Current.StateDir;
         Directory.CreateDirectory(dir);
         var lockPath = Path.Combine(dir, "bridge.lock");
         try
@@ -44,18 +44,6 @@ internal sealed class SingleInstance : IDisposable
         {
             return null;
         }
-    }
-
-    private static string ResolveLockDir()
-    {
-        if (OperatingSystem.IsWindows())
-            return Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "claude-status-bridge");
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        if (OperatingSystem.IsMacOS())
-            return Path.Combine(home, "Library", "Caches", "claude-status-bridge");
-        return Path.Combine(home, ".local", "state", "claude-status-bridge");
     }
 
     public void Dispose()

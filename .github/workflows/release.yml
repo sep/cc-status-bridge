@@ -187,9 +187,11 @@ jobs:
 
             - **Windows:** double-click the `*-Setup.exe`. Per-user install,
               no admin needed. Installs to `%LOCALAPPDATA%`, registers in
-              Apps & Features, sets up the auto-launch task, drops a tray
-              icon. SmartScreen may warn "publisher not verified" on first
-              run; click "More info → Run anyway."
+              Apps & Features, writes the standard
+              `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry
+              so the bridge starts at login, and drops a tray icon.
+              SmartScreen may warn "publisher not verified" on first run;
+              click "More info → Run anyway."
             - **macOS:** open the `.dmg`, drag `ClaudePanelBridge.app` into
               `Applications`, then double-click it. The app lives in your
               menu bar (no Dock icon — it's a tray-only app).
@@ -222,5 +224,6 @@ jobs:
             ## Subcommands
 
             `install` / `uninstall` / `start` / `stop` / `restart` /
-            `status` / `version` / `logs` / `match` / `configure` —
-            see `--help` for details.
+            `status` / `version` / `logs` / `find` —
+            see `--help` for details. (`match` is kept as a legacy
+            alias for `find`.)

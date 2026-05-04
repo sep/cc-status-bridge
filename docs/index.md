@@ -5,12 +5,14 @@ title: ClaudePanel Bridge
 
 # ClaudePanel Bridge
 
-The bridge is the cross-platform daemon that connects Claude Code to your
-ClaudePanel hardware. It subscribes to the [ClaudePanel
+The bridge is the cross-platform tray app that connects Claude Code to
+your ClaudePanel hardware. It subscribes to the [ClaudePanel
 plugin](https://sep.github.io/cc-status-plugin/)'s local broker, watches
 your Claude Code session lifecycle events, and forwards each state change
 to your ESP32-S3 over USB serial.
 
+It lives in your system tray (Windows notification area / macOS menu bar
+/ Linux status icon). Right-click for start / stop / pause / logs / quit.
 You probably don't need to think about it once it's installed — it
 starts on login, runs in the background, and survives reboots.
 
@@ -64,55 +66,54 @@ starts on login, runs in the background, and survives reboots.
 
   <div class="os-tab-content" data-os="windows" role="tabpanel">
     <h3>Windows (x64)</h3>
-    <p>Download <code>ClaudeStatusBridge-win-x64.exe</code> from the
-       <a href="https://github.com/sep/cc-status-bridge/releases/latest">latest release</a>.</p>
-    <p>Open an <strong>Administrator</strong> PowerShell window in the
-       folder where you saved the binary, then:</p>
-<pre><code>.\ClaudeStatusBridge-win-x64.exe install
-</code></pre>
-    <p>This registers a Scheduled Task that runs the bridge at login.
-       The bridge starts immediately and from then on auto-launches each
-       time you sign in.</p>
-    <p><strong>Verify:</strong></p>
-<pre><code>.\ClaudeStatusBridge-win-x64.exe status
-</code></pre>
-    <p>To see live logs, run <code>.\ClaudeStatusBridge-win-x64.exe logs</code>.</p>
+    <p>Download <code>ClaudePanelBridge-*-Setup.exe</code> from the
+       <a href="https://github.com/sep/cc-status-bridge/releases/latest">latest release</a>
+       and double-click it.</p>
+    <p>Per-user install — no admin password needed. The installer drops
+       the binary into <code>%LOCALAPPDATA%</code>, registers an entry in
+       Apps &amp; Features, writes the standard
+       <code>HKCU\Software\Microsoft\Windows\CurrentVersion\Run</code>
+       autostart entry so the bridge launches at login, and starts the
+       tray icon immediately.</p>
+    <p>SmartScreen may warn "publisher not verified" on first run; click
+       <em>More info → Run anyway</em>. The binary is self-signed; full
+       Authenticode signing isn't in place yet.</p>
+    <p><strong>Uninstall:</strong> Settings → Apps → ClaudePanel Bridge →
+       Uninstall.</p>
   </div>
 
   <div class="os-tab-content" data-os="macos" role="tabpanel">
     <h3>macOS (Apple Silicon or Intel)</h3>
-    <p>Download <code>ClaudeStatusBridge-osx-arm64</code> (Apple Silicon)
-       or <code>ClaudeStatusBridge-osx-x64</code> (Intel) from the
-       <a href="https://github.com/sep/cc-status-bridge/releases/latest">latest release</a>.</p>
-    <p>In Terminal, navigate to the download folder, then:</p>
-<pre><code>chmod +x ClaudeStatusBridge-osx-arm64
-xattr -dr com.apple.quarantine ./ClaudeStatusBridge-osx-arm64
-./ClaudeStatusBridge-osx-arm64 install
-</code></pre>
-    <p>The <code>xattr</code> step clears macOS Gatekeeper's quarantine
-       flag — it's required because the binary is signed ad-hoc rather
-       than fully notarized. Without it, the launchd agent that
-       <code>install</code> registers would fail to launch the binary
-       silently.</p>
-    <p><strong>Verify:</strong></p>
-<pre><code>./ClaudeStatusBridge-osx-arm64 status
-</code></pre>
-    <p>To see live logs, run <code>./ClaudeStatusBridge-osx-arm64 logs</code>.</p>
+    <p>Download the matching <code>.dmg</code> from the
+       <a href="https://github.com/sep/cc-status-bridge/releases/latest">latest release</a>:</p>
+    <ul>
+      <li><code>ClaudePanelBridge-*-osx-arm64.dmg</code> &mdash; Apple Silicon</li>
+      <li><code>ClaudePanelBridge-*-osx-x64.dmg</code> &mdash; Intel</li>
+    </ul>
+    <p>Open the <code>.dmg</code>, drag <code>ClaudePanelBridge.app</code>
+       into <code>Applications</code>, then double-click it. The app
+       lives in your menu bar — there is no Dock icon.</p>
+    <p>First launch may need: System Settings → Privacy &amp; Security →
+       <em>Open Anyway</em>. The bundle is ad-hoc signed but not
+       notarized (no Apple Developer cert yet), so Gatekeeper asks for
+       confirmation the first time.</p>
   </div>
 
   <div class="os-tab-content" data-os="linux" role="tabpanel">
     <h3>Linux (x64)</h3>
-    <p>Download <code>ClaudeStatusBridge-linux-x64</code> from the
-       <a href="https://github.com/sep/cc-status-bridge/releases/latest">latest release</a>.</p>
-<pre><code>chmod +x ClaudeStatusBridge-linux-x64
-./ClaudeStatusBridge-linux-x64 install
+    <p>Download <code>ClaudePanelBridge-*-x86_64.AppImage</code> from
+       the <a href="https://github.com/sep/cc-status-bridge/releases/latest">latest release</a>.</p>
+<pre><code>chmod +x ClaudePanelBridge-*-x86_64.AppImage
+./ClaudePanelBridge-*-x86_64.AppImage
 </code></pre>
-    <p>This writes a systemd user unit (<code>~/.config/systemd/user/claude-status-bridge.service</code>)
-       and starts it. It will resume at every login.</p>
-    <p><strong>Verify:</strong></p>
-<pre><code>./ClaudeStatusBridge-linux-x64 status
-</code></pre>
-    <p>To see live logs, run <code>./ClaudeStatusBridge-linux-x64 logs</code>.</p>
+    <p>If you want it to start at login, run
+       <code>./ClaudePanelBridge-*-x86_64.AppImage install</code> once —
+       that writes a systemd user unit
+       (<code>~/.config/systemd/user/claude-status-bridge.service</code>)
+       which resumes the bridge each session.</p>
+    <p>The tray icon needs a system-tray host on GNOME (the
+       <em>AppIndicator and KStatusNotifierItem Support</em> extension
+       is the usual one). KDE / XFCE / Cinnamon work out of the box.</p>
   </div>
 </div>
 
@@ -151,27 +152,50 @@ xattr -dr com.apple.quarantine ./ClaudeStatusBridge-osx-arm64
 ## Find your hardware
 
 The bridge needs to know which USB serial port your ClaudePanel is on.
-Easiest way to figure it out:
+The first time it can't find one, the tray icon stays gray. Plug your
+ESP32-S3 in, then either:
 
-```text
-bridge match
-```
-
-`match` scans every plausible serial port, asks each one to identify
-itself, and offers to write the chosen port into `appsettings.json` for
-you. Run it once after install (or whenever you switch USB cables).
+- **Wait a few seconds** — the bridge re-scans known-good ports
+  periodically and will find a freshly-attached device on its own.
+- **Run find from a terminal** — `ClaudeStatusBridge find` scans every
+  plausible serial port, asks each one to identify itself, and writes
+  the chosen port into `appsettings.json` for you. See
+  [CLI usage](#cli-usage) below for the exact invocation on your OS.
 
 ## After install
 
 The bridge runs in the background. To see it working:
 
 1. Plug your ESP32-S3 ClaudePanel hardware in via USB.
-2. Run `bridge match` and confirm the port it found.
+2. Right-click the tray icon → use **Connect device** to pick the
+   detected ClaudePanel (or run `find` from a terminal).
 3. Send a prompt in any Claude Code session that has the
    <a href="https://sep.github.io/cc-status-plugin/">ClaudePanel plugin</a>
    installed. The matrix should react.
 
-## Subcommands
+## CLI usage
+
+The bridge is primarily a tray app — most users never need the
+command line. But all the same operations are available as
+subcommands of the binary, which is handy for scripting, CI, or
+debugging.
+
+On Windows the executable lives at
+`%LOCALAPPDATA%\ClaudePanelBridge\ClaudeStatusBridge.exe`. On macOS
+it's inside the bundle: `/Applications/ClaudePanelBridge.app/Contents/MacOS/ClaudeStatusBridge`.
+On Linux it's the AppImage you downloaded.
+
+**Windows note:** the Windows build is a Windows-subsystem binary so
+the tray launches without a console flash. That means cmd / PowerShell
+won't block waiting for it to finish — output still flows to your
+shell, but it interleaves with the next prompt. For interactive
+subcommands like `find`, invoke via `Start-Process -Wait`:
+
+```pwsh
+Start-Process -Wait `
+    "$env:LOCALAPPDATA\ClaudePanelBridge\ClaudeStatusBridge.exe" `
+    -ArgumentList find
+```
 
 | Command            | What it does                                        |
 |--------------------|-----------------------------------------------------|
@@ -179,8 +203,9 @@ The bridge runs in the background. To see it working:
 | `uninstall`        | Stop + deregister.                                  |
 | `start` / `stop`   | Toggle the running instance without deregistering.  |
 | `restart`          | Stop then start.                                    |
-| `match`            | Scan + identify a connected ClaudePanel; write the  |
-|                    | chosen port to `appsettings.json`.                  |
+| `find`             | Scan + identify a connected ClaudePanel; write the  |
+|                    | chosen port to `appsettings.json`. (interactive)    |
+|                    | Also accepts the legacy alias `match`.              |
 | `status`           | Show install state, running state, and version.     |
 | `version`          | Print the version string.                           |
 | `logs`             | Tail the bridge log (Ctrl-C to exit).               |

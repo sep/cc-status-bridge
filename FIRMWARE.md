@@ -14,13 +14,14 @@ Code session on a development machine that has ESP-IDF v6.0 installed.
 ## 1. System overview
 
 ```
- Claude Code (WSL)
+ Claude Code  (Linux / macOS / Windows / WSL)
     │
     ▼ lifecycle hooks (stdin JSON)
  emit.py  ─────►  broker.py                (localhost TCP, NDJSON, PUB/SUB)
                         │
                         ▼ SUB subscription
-                   ClaudeStatusBridge.exe  (Windows-side, C# / .NET 10)
+                   ClaudeStatusBridge      (cross-platform tray app,
+                                            C# / .NET 10)
                         │
                         ▼ NDJSON over USB-Serial-JTAG @ 115200
                    ESP32-S3               ◄── YOU ARE HERE
@@ -478,6 +479,11 @@ monotonically increasing `seq` so host can pair responses.
 Useful on bridge startup to detect if the device is already displaying
 something that differs from the host's view of "current state."
 
+> **Status (v0.3.0):** the bridge does **not** currently emit `resync`.
+> The shape is reserved and firmware MAY support it, but doing so isn't
+> required for any released bridge version. A device that drops
+> `resync` lines silently is fully spec-compliant.
+
 **IDENTIFY** — host asks each ESP to briefly render its panel IDs
 large and centered, so the user can verify which physical display is
 which after rearranging cables:
@@ -614,8 +620,8 @@ pinned client slot:
   continue. Do NOT stop forwarding state updates when pongs are
   missing — USB-CDC writes still happen. PING/PONG is informational.
 - On connect / reconnect, the bridge SHOULD emit a `configure` with
-  its intended layout followed by a `resync` so the initial state is
-  reconciled before real traffic starts.
+  its intended layout. (Earlier drafts called for a follow-up `resync`;
+  the current bridge omits that — see RESYNC status note above.)
 - Bridge MAY publish device status to the broker later (as a separate
   metric) if we decide to surface device-offline state inside Claude.
 
@@ -689,15 +695,17 @@ Likely future `type`-dispatched commands:
   for the whole claude-status system; start here for the system-level
   overview. The relevant source files are `bin/broker.py` (TCP NDJSON
   broker) and `bin/emit.py` (hook publisher).
-- **Bridge** (Windows-side transport, C# / .NET):
-  <https://github.com/sep/cc-status-bridge>. See `SerialOutput.cs` and
-  `StateMapper.cs` for what the bridge emits onto the serial port —
-  this is the authoritative upstream for the wire contract in §3.
+- **Bridge** (cross-platform tray app, C# / .NET): Windows / macOS /
+  Linux. <https://github.com/sep/cc-status-bridge>. See
+  `SerialOutput.cs` and `StateMapper.cs` for what the bridge emits onto
+  the serial port — this is the authoritative upstream for the wire
+  contract in §3.
 - **Display firmware** (ESP32-S3, ESP-IDF v6.0):
   <https://github.com/sep/cc-status-display>. Reads NDJSON from the
   bridge on USB-Serial-JTAG and renders to a HUB75 panel.
-- The bridge mirrors broker discovery state to
-  `%USERPROFILE%\.claude-status\sessions\<id>\broker.json` on the
-  Windows side, so the Windows EXE can find live sessions without
-  traversing `\\wsl$\`. Firmware does not need to know about this — it
-  only sees the serial output.
+- The bridge mirrors broker discovery state to a per-OS user directory
+  (`%USERPROFILE%\.claude-status\sessions\<id>\broker.json` on Windows,
+  `~/.claude-status/sessions/<id>/broker.json` on macOS / Linux), so
+  the bridge can find live sessions without crossing filesystem
+  boundaries (notably WSL → Windows). Firmware does not need to know
+  about this — it only sees the serial output.

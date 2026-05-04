@@ -1,7 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <!-- WinExe (Windows-subsystem): no console allocated when launched from
+         a scheduled task / installer / shortcut — the bridge is a tray app.
+         CLI subcommands re-attach to the parent shell's console at startup
+         via AttachConsole(ATTACH_PARENT_PROCESS); see ConsoleAttach.cs. -->
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>ClaudeStatusBridge</RootNamespace>
     <AssemblyName>ClaudeStatusBridge</AssemblyName>
@@ -35,6 +39,12 @@
     <PackageReference Include="Avalonia" Version="11.2.7" />
     <PackageReference Include="Avalonia.Desktop" Version="11.2.7" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.7" />
+
+    <!-- Override Avalonia's transitive Tmds.DBus.Protocol 0.20.0 (flagged
+         by GHSA-xrw6-gwf8-vvr9: malicious D-Bus peers can spoof signals
+         and exhaust FDs). 0.21.3 is the in-series patched release. Only
+         actually exercised on Linux; Windows / macOS don't load it. -->
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
   </ItemGroup>
 
   <ItemGroup>

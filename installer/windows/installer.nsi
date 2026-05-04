@@ -45,7 +45,13 @@ UninstPage instfiles
 ; ---------------------------------------------------------------------------
 Section "Install"
   ; Make sure no instance is running before we copy the new EXE in.
-  ExecWait 'taskkill /F /IM "${EXENAME}"'
+  ; nsExec::ExecToLog runs the child with no visible console window and
+  ; pipes output into the installer details pane — no flash. Wrap in
+  ; cmd /c with redirection so taskkill's "process not found" stderr on
+  ; first install (when nothing's running yet) doesn't show up as a
+  ; scary red ERROR line in the details pane.
+  nsExec::ExecToLog 'cmd /c taskkill /F /IM "${EXENAME}" >nul 2>&1'
+  Pop $0
   Sleep 500
 
   SetOutPath "$INSTDIR"
@@ -73,22 +79,27 @@ Section "Install"
   ; Write the uninstaller
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
-  ; Register the scheduled task that runs the bridge at login.
-  ; Failure here is non-fatal — the user can register later via the
-  ; tray menu's "Run on login" toggle.
-  ExecWait '"$INSTDIR\${EXENAME}" install'
-
-  ; Launch the tray app immediately so the icon appears.
-  Exec '"$INSTDIR\${EXENAME}"'
+  ; Register the autostart entry (HKCU Run key) and launch the tray.
+  ; `bridge install` writes the Run value AND spawns the tray itself,
+  ; so this single call covers both registration and "start now".
+  ; Failure is non-fatal — the user can flip the tray menu's "Run on
+  ; login" toggle later to retry.
+  nsExec::ExecToLog '"$INSTDIR\${EXENAME}" install'
+  Pop $0
 SectionEnd
 
 ; ---------------------------------------------------------------------------
 ; Uninstall
 ; ---------------------------------------------------------------------------
 Section "Uninstall"
-  ; Deregister scheduled task and stop any running instance
-  ExecWait '"$INSTDIR\${EXENAME}" uninstall'
-  ExecWait 'taskkill /F /IM "${EXENAME}"'
+  ; Deregister scheduled task and stop any running instance.
+  ; Same cmd /c redirection trick as the install section: silences
+  ; taskkill's harmless "process not found" stderr if the user already
+  ; quit the tray app from the menu before uninstalling.
+  nsExec::ExecToLog '"$INSTDIR\${EXENAME}" uninstall'
+  Pop $0
+  nsExec::ExecToLog 'cmd /c taskkill /F /IM "${EXENAME}" >nul 2>&1'
+  Pop $0
   Sleep 500
 
   Delete "$INSTDIR\${EXENAME}"

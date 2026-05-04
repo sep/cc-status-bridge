@@ -34,29 +34,14 @@ internal static class Log
     }
 
     /// <summary>
-    /// Resolve the log file path per platform. Returns null if it can't be
-    /// determined or the directory can't be created.
+    /// Resolve the log file path. Returns null if it can't be determined
+    /// or the directory can't be created.
     /// </summary>
     private static string? ResolveLogPath()
     {
         try
         {
-            string baseDir;
-            if (OperatingSystem.IsWindows())
-            {
-                var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                baseDir = Path.Combine(local, "claude-status-bridge");
-            }
-            else if (OperatingSystem.IsMacOS())
-            {
-                var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                baseDir = Path.Combine(home, "Library", "Logs");
-            }
-            else
-            {
-                var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                baseDir = Path.Combine(home, ".local", "state", "claude-status-bridge");
-            }
+            var baseDir = Platform.Current.LogDir;
             Directory.CreateDirectory(baseDir);
             return Path.Combine(baseDir, "bridge.log");
         }

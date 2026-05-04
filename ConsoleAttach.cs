@@ -3,50 +3,47 @@ using System.Runtime.InteropServices;
 namespace ClaudeStatusBridge;
 
 /// <summary>
-/// Windows console hygiene. We compile as a Console-subsystem app so that
-/// pwsh / cmd wait for the process and output flows correctly. The cost is
-/// that when the OS creates a console for us (because we were launched
-/// from a parent that doesn't have one — typically a scheduled task), a
-/// brief window flash appears.
+/// Bridge is compiled as WinExe (Windows subsystem) so that the default
+/// tray-app launch path doesn't allocate a console window. CLI subcommands
+/// (status / logs / install / etc.) still need stdout/stderr to flow into
+/// the user's shell, so when one of those is dispatched we attach to the
+/// parent process's console and rebind Console.Out / Error / In.
 ///
-/// HideConsoleIfOwned solves that: it asks the OS how many processes are
-/// attached to our console. If it's just us (count == 1), we own that
-/// console (the OS allocated it for our process), so we hide its window.
-/// If multiple PIDs are attached (count > 1), we share a console with our
-/// parent (typically pwsh / cmd), and we leave the window alone.
+/// Caveat: because we're WinExe, cmd.exe / pwsh don't block waiting for us
+/// the way they do for console-subsystem apps. Output written after the
+/// shell has already drawn its next prompt will interleave. For
+/// interactive CLI (`bridge find`) users should invoke us with
+/// `Start-Process -Wait` (pwsh) or `start /wait` (cmd).
 ///
-/// No-op on macOS / Linux.
+/// No-op on macOS / Linux — those subsystem mechanics are Windows-only.
 /// </summary>
 internal static class ConsoleAttach
 {
-    private const int SW_HIDE = 0;
+    private const uint ATTACH_PARENT_PROCESS = 0xFFFFFFFFu;
 
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr GetConsoleWindow();
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AttachConsole(uint dwProcessId);
 
-    [DllImport("kernel32.dll")]
-    private static extern uint GetConsoleProcessList(uint[] processList, uint count);
-
-    [DllImport("user32.dll")]
-    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-    public static void HideConsoleIfOwned()
+    public static void AttachToParentIfCli()
     {
         if (!OperatingSystem.IsWindows()) return;
 
         try
         {
-            var pids = new uint[16];
-            var count = GetConsoleProcessList(pids, (uint)pids.Length);
-            if (count != 1) return;  // shared console (parent has one); leave alone
+            if (!AttachConsole(ATTACH_PARENT_PROCESS)) return;
 
-            var hwnd = GetConsoleWindow();
-            if (hwnd != IntPtr.Zero)
-                ShowWindow(hwnd, SW_HIDE);
+            // .NET's Console streams were initialized at process start when
+            // there was no console; they're bound to Stream.Null. Rebind
+            // them to the now-attached console so writes/reads work.
+            var stdout = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
+            Console.SetOut(stdout);
+            var stderr = new StreamWriter(Console.OpenStandardError()) { AutoFlush = true };
+            Console.SetError(stderr);
+            Console.SetIn(new StreamReader(Console.OpenStandardInput()));
         }
         catch
         {
-            // never let console-hide failures take down the bridge
+            // never let console-attach failures take down a CLI run
         }
     }
 }

@@ -90,7 +90,14 @@ jobs:
         run: |
           choco install nsis -y --no-progress
           version="$(tr -d '[:space:]' < version.txt)"
-          binary="$PWD/out/${{ matrix.rid }}/ClaudeStatusBridge-${{ matrix.rid }}${{ matrix.exe_suffix }}"
+          # cygpath -w gives a native Windows path (backslashes, drive
+          # letter form). Without it, $PWD returns a POSIX-style
+          # /d/a/... that MSYS half-converts in argv and that NSIS's
+          # File directive does not reliably resolve.
+          binary="$(cygpath -w "$PWD/out/${{ matrix.rid }}/ClaudeStatusBridge-${{ matrix.rid }}${{ matrix.exe_suffix }}")"
+          echo "--- contents of out/${{ matrix.rid }}/ ---"
+          ls -la "out/${{ matrix.rid }}/"
+          echo "--- BINARY=${binary} ---"
           # makensis accepts both /D and -D for compile-time defines.
           # Use -D under bash on Windows: the leading-slash form trips
           # MSYS path conversion, which rewrites "/DVERSION=0.3.0" into

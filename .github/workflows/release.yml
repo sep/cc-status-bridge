@@ -91,9 +91,12 @@ jobs:
           choco install nsis -y --no-progress
           version="$(tr -d '[:space:]' < version.txt)"
           binary="$PWD/out/${{ matrix.rid }}/ClaudeStatusBridge-${{ matrix.rid }}${{ matrix.exe_suffix }}"
-          # makensis path on Windows runners
+          # makensis accepts both /D and -D for compile-time defines.
+          # Use -D under bash on Windows: the leading-slash form trips
+          # MSYS path conversion, which rewrites "/DVERSION=0.3.0" into
+          # "C:/Program Files/Git/DVERSION=0.3.0" before makensis sees it.
           "/c/Program Files (x86)/NSIS/makensis.exe" \
-            "/DVERSION=${version}" "/DBINARY=${binary}" \
+            "-DVERSION=${version}" "-DBINARY=${binary}" \
             installer/windows/installer.nsi
           ls -la installer/windows/
 

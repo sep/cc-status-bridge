@@ -70,6 +70,10 @@ internal sealed class MacOSPlatform : IPlatform
            .Where(p => !p.Contains("Bluetooth", StringComparison.OrdinalIgnoreCase))
            .OrderBy(p => p);
 
+    public bool PortNameLooksValid(string name) =>
+        !string.IsNullOrWhiteSpace(name)
+        && name.StartsWith("/dev/cu.", StringComparison.Ordinal);
+
     public string LogDir =>
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),

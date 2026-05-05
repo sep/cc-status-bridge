@@ -43,6 +43,17 @@ internal interface IPlatform
     /// </summary>
     IEnumerable<string> FilterSerialPorts(IEnumerable<string> raw);
 
+    /// <summary>
+    /// True iff <paramref name="name"/> matches the conventional naming
+    /// pattern for a USB-serial port on this OS (regex / prefix match,
+    /// not an existence check). Used by the first-run picker to decide
+    /// whether the configured port is structurally valid for the
+    /// current platform — `"COM4"` on macOS returns false even though
+    /// the string is non-empty, which is exactly the trigger we want
+    /// for the picker dialog. Empty string also returns false.
+    /// </summary>
+    bool PortNameLooksValid(string name);
+
     // ---- Per-user data directories ---------------------------------
 
     /// <summary>

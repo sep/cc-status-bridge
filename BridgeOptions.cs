@@ -10,7 +10,14 @@ public sealed class BridgeOptions
     /// </summary>
     public string MirrorDir { get; set; } = "";
 
-    public string ComPort { get; set; } = "COM4";
+    /// <summary>
+    /// Configured serial port. Empty string = "no port chosen yet" — at
+    /// startup the tray host treats that (or any value that doesn't look
+    /// like a valid port for the running OS, e.g. "COM4" on macOS) as a
+    /// trigger to pop the first-run device picker rather than silently
+    /// failing to open a non-existent port.
+    /// </summary>
+    public string ComPort { get; set; } = "";
     public int BaudRate { get; set; } = 115200;
     public int ReconnectDelayMs { get; set; } = 2000;
     public int SerialReopenDelayMs { get; set; } = 1000;

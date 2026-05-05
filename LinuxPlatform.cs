@@ -72,6 +72,11 @@ internal sealed class LinuxPlatform : IPlatform
                 p.StartsWith("/dev/ttyUSB", StringComparison.Ordinal))
            .OrderBy(p => p);
 
+    public bool PortNameLooksValid(string name) =>
+        !string.IsNullOrWhiteSpace(name)
+        && (name.StartsWith("/dev/ttyACM", StringComparison.Ordinal)
+            || name.StartsWith("/dev/ttyUSB", StringComparison.Ordinal));
+
     public string LogDir =>
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),

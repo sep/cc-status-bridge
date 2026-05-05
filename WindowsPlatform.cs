@@ -78,6 +78,11 @@ internal sealed class WindowsPlatform : IPlatform
         // bluetooth-incoming garbage from GetPortNames().
         raw.OrderBy(p => p, StringComparer.OrdinalIgnoreCase);
 
+    public bool PortNameLooksValid(string name) =>
+        !string.IsNullOrWhiteSpace(name)
+        && System.Text.RegularExpressions.Regex.IsMatch(
+            name, @"^COM\d+$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
     public string LogDir =>
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

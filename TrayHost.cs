@@ -65,9 +65,24 @@ internal static class TrayHost
         };
         TrayIcon.SetIcons(app, new TrayIcons { _trayIcon });
 
-        StartBridge();
         RefreshAutoRunCheck();
         StartScanner();
+
+        // First-run / stale-default guard: if the configured ComPort
+        // doesn't match the OS's port-name pattern (e.g. empty on first
+        // run, or "COM4" on a Mac upgrading from a pre-0.3.3 default),
+        // pop the picker before starting the bridge subscription.
+        // Otherwise we'd silently fail to open the port and leave the
+        // user staring at a gray tray icon with no feedback.
+        var configured = _options.ComPort ?? "";
+        if (Platform.Current.PortNameLooksValid(configured))
+        {
+            StartBridge();
+        }
+        else
+        {
+            ShowPortPickerOrExit();
+        }
     }
 
     // ============================================================
@@ -334,6 +349,51 @@ internal static class TrayHost
         _serial = new SerialOutput(_options);
 
         Dispatcher.UIThread.Post(StartBridge);
+    }
+
+    // ============================================================
+    // First-run port picker
+    // ============================================================
+
+    private static ConnectDeviceWindow? _pickerWindow;
+
+    private static void ShowPortPickerOrExit()
+    {
+        if (_options is null) return;
+        Dispatcher.UIThread.Post(() =>
+        {
+            UpdateStatusLabel("Status: pick a device");
+            _pickerWindow = new ConnectDeviceWindow(_options.BaudRate);
+            _pickerWindow.PortChosen += OnPickerPortChosen;
+            _pickerWindow.Closed += OnPickerClosed;
+            _pickerWindow.Show();
+        });
+    }
+
+    private static void OnPickerPortChosen(string port)
+    {
+        if (_options is null) return;
+        if (!Installer.TryWriteComPortConfig(port, out _, out var err))
+        {
+            UpdateStatusLabel($"Status: failed to save port ({err})");
+            return;
+        }
+        _options.ComPort = port;
+        try { _serial?.Dispose(); } catch { }
+        _serial = new SerialOutput(_options);
+        StartBridge();
+    }
+
+    private static void OnPickerClosed(object? sender, EventArgs e)
+    {
+        var chosen = _pickerWindow?.PortWasChosen ?? false;
+        _pickerWindow = null;
+        if (!chosen)
+        {
+            // User dismissed without picking — there's no port to talk to,
+            // so quit cleanly rather than leave a useless tray icon.
+            Quit();
+        }
     }
 
     // ============================================================

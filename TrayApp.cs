@@ -33,5 +33,12 @@ public sealed class TrayApp : Application
         AppBuilder
             .Configure<TrayApp>()
             .UsePlatformDetect()
+            // Tell Avalonia's macOS bootstrap to use NSApplicationActivationPolicy.Accessory
+            // instead of .Regular. Without this, Avalonia overrides the bundle's
+            // LSUIElement=true and we get a Dock icon despite Info.plist saying we
+            // shouldn't. ShowInDock=false → menu-bar agent app, no Dock entry, no
+            // main app menu (so Cmd+Q is a non-issue; quit lives in the tray menu).
+            // No-op on Windows / Linux.
+            .With(new MacOSPlatformOptions { ShowInDock = false })
             .LogToTrace();
 }

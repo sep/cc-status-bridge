@@ -66,7 +66,6 @@ internal static class TrayHost
         TrayIcon.SetIcons(app, new TrayIcons { _trayIcon });
 
         RefreshAutoRunCheck();
-        StartScanner();
 
         // First-run / stale-default guard: if the configured ComPort
         // doesn't match the OS's port-name pattern (e.g. empty on first
@@ -136,6 +135,14 @@ internal static class TrayHost
         _runner = new BridgeRunner(_options, _broker, _serial);
         _runner.AggregateStateChanged += OnAggregateStateChanged;
         _runnerTask = Task.Run(() => _runner.RunAsync(_runnerCts.Token));
+
+        // Now that we have a real configured port the runner will hold,
+        // the background scanner can safely poke the *other* ports for
+        // the "Connect device ▸" submenu. Calling this earlier (before
+        // the picker resolved) raced the picker's own scan and produced
+        // spurious "access denied" hits on whichever scan lost the
+        // open() coin flip. StartScanner is idempotent.
+        StartScanner();
 
         UpdateStatusLabel("Status: running");
         UpdatePauseResumeLabel(paused: false);
@@ -243,6 +250,11 @@ internal static class TrayHost
 
     private static void StartScanner()
     {
+        // Idempotent: StartBridge calls into us each time it spins up
+        // the runner (initial start, resume-from-pause, post-picker
+        // first start). One scanner loop is enough for the lifetime
+        // of the process.
+        if (_scannerCts is not null) return;
         _scannerCts = new CancellationTokenSource();
         _ = Task.Run(() => ScannerLoopAsync(_scannerCts.Token));
     }

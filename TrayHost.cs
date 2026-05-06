@@ -129,7 +129,13 @@ internal static class TrayHost
     private static void StartBridge()
     {
         if (_runner is not null) return;
-        if (_options is null || _broker is null || _serial is null) return;
+        if (_options is null || _broker is null) return;
+
+        // Lazy-init SerialOutput so a paused-then-resumed bridge can
+        // reopen the port that StopBridgeAsync released. On the very
+        // first start this is a no-op (AttachTo already created one);
+        // on every Resume after a Pause it does the actual reopen.
+        if (_serial is null) _serial = new SerialOutput(_options);
 
         _runnerCts = new CancellationTokenSource();
         _runner = new BridgeRunner(_options, _broker, _serial);
@@ -164,6 +170,15 @@ internal static class TrayHost
             try { if (task is not null) await task; } catch { }
             try { runner.AggregateStateChanged -= OnAggregateStateChanged; } catch { }
             try { cts?.Dispose(); } catch { }
+
+            // Release the serial port so other apps (firmware flasher,
+            // serial monitor, etc.) can use it while the bridge is
+            // paused. Done AFTER the runner task has exited so we
+            // don't race the runner's own serial I/O during teardown.
+            // StartBridge() lazy-creates a fresh SerialOutput on resume.
+            try { _serial?.Dispose(); } catch { }
+            _serial = null;
+
             Dispatcher.UIThread.Post(() =>
             {
                 UpdateStatusLabel("Status: paused");

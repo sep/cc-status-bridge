@@ -26,6 +26,18 @@ public sealed class BridgeOptions
     public int InterruptIdleMs { get; set; } = 300000;  // 5 minutes
     public int SerialPollIntervalMs { get; set; } = 2000;
 
+    // PING/PONG liveness (FIRMWARE.md §8). Bridge emits a ping every
+    // PingIntervalMs; if no pong arrives within PingTimeoutMs of any
+    // sent ping, the missed-pong counter increments. Crossing
+    // PingMissedThreshold logs `device unresponsive` once; recovery
+    // logs `device responsive again` once. Routine ping/pong traffic
+    // is intentionally NOT logged — would be a per-5-second log line
+    // for every bridge install. State updates keep flowing regardless;
+    // PING/PONG is purely informational.
+    public int PingIntervalMs { get; set; } = 5000;
+    public int PingTimeoutMs { get; set; } = 2000;
+    public int PingMissedThreshold { get; set; } = 3;
+
     public string? ResolvedMirrorDir =>
         string.IsNullOrWhiteSpace(MirrorDir)
             ? null

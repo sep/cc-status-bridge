@@ -1,5 +1,6 @@
 using System.IO.Ports;
 using System.Text;
+using System.Text.Json.Nodes;
 
 namespace ClaudeStatusBridge;
 
@@ -8,6 +9,21 @@ public sealed class SerialOutput : IDisposable
     private readonly BridgeOptions _options;
     private SerialPort? _port;
     private readonly object _lock = new();
+
+    // Reader-side state for the PING/PONG path. The reader runs as a
+    // background Task whenever a port is open; on close it gets
+    // cancelled and the task is abandoned (the port-close itself will
+    // make ReadLine throw, which is the loop's exit signal).
+    private CancellationTokenSource? _readerCts;
+    private Task? _readerTask;
+
+    /// <summary>
+    /// Fires for every successfully-parsed JSON line received from the
+    /// device. Currently used by BridgeRunner.PingerAsync to spot
+    /// `{"type":"pong",...}` replies, but any caller can subscribe.
+    /// Lines that fail to parse as JSON are silently dropped.
+    /// </summary>
+    public event Action<JsonNode>? LineReceived;
 
     public SerialOutput(BridgeOptions options)
     {
@@ -75,11 +91,19 @@ public sealed class SerialOutput : IDisposable
     public void CloseIfOpen()
     {
         SerialPort? port;
+        CancellationTokenSource? readerCts;
         lock (_lock)
         {
             port = _port;
             _port = null;
+            readerCts = _readerCts;
+            _readerCts = null;
+            // _readerTask is intentionally not nulled here; closing the
+            // port will make its ReadLine throw, the task exits on its
+            // own. Nothing awaits it.
         }
+        try { readerCts?.Cancel(); } catch { }
+        try { readerCts?.Dispose(); } catch { }
         if (port is not null) ClosePortBestEffort(port);
     }
 
@@ -105,6 +129,8 @@ public sealed class SerialOutput : IDisposable
 
     public bool TryOpen()
     {
+        SerialPort? port;
+        CancellationTokenSource? cts;
         lock (_lock)
         {
             if (_port?.IsOpen == true) return true;
@@ -115,7 +141,14 @@ public sealed class SerialOutput : IDisposable
                 {
                     Encoding = Encoding.UTF8,
                     NewLine = "\n",
-                    ReadTimeout = SerialPort.InfiniteTimeout,
+                    // 200ms read timeout (was Infinite) so the reader
+                    // loop can pulse: TimeoutException on every empty
+                    // window lets it check cancellation and exit
+                    // promptly when the port closes. SerialPort
+                    // internally buffers partial reads across timeouts,
+                    // so a NewLine that straddles a timeout window
+                    // still resolves on the next ReadLine.
+                    ReadTimeout = 200,
                     WriteTimeout = 1000,
                     // DtrEnable / RtsEnable intentionally left at their default
                     // (false). Asserting and then de-asserting these lines on
@@ -126,15 +159,60 @@ public sealed class SerialOutput : IDisposable
                     RtsEnable = false,
                 };
                 _port.Open();
-                return true;
+                _readerCts = new CancellationTokenSource();
+                port = _port;
+                cts = _readerCts;
             }
             catch (Exception ex)
             {
                 Log.Warn($"[bridge] serial open failed: {ex.Message}");
                 _port?.Dispose();
                 _port = null;
+                _readerCts?.Dispose();
+                _readerCts = null;
                 return false;
             }
+        }
+        // Started outside the lock to avoid holding the lock across the
+        // Task.Run call (cheap but a clean discipline).
+        _readerTask = Task.Run(() => ReaderLoop(port, cts.Token));
+        return true;
+    }
+
+    private void ReaderLoop(SerialPort port, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            string? line;
+            try
+            {
+                line = port.ReadLine();
+            }
+            catch (TimeoutException)
+            {
+                // Empty 200ms window — re-check cancellation and try again.
+                continue;
+            }
+            catch (OperationCanceledException) { break; }
+            catch (InvalidOperationException) { break; }   // port closed
+            catch (System.IO.IOException)     { break; }   // port disappeared
+            catch (Exception ex)
+            {
+                Log.Warn($"[bridge] serial read failed: {ex.Message}");
+                break;
+            }
+
+            if (string.IsNullOrEmpty(line)) continue;
+
+            // Tolerate non-JSON garbage (firmware boot logs, partial
+            // frames, etc.) — drop without complaint.
+            JsonNode? doc;
+            try { doc = JsonNode.Parse(line); }
+            catch { continue; }
+            if (doc is null) continue;
+
+            try { LineReceived?.Invoke(doc); }
+            catch { /* swallow listener exceptions; reader is best-effort */ }
         }
     }
 

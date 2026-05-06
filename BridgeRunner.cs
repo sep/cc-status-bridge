@@ -98,6 +98,7 @@ public sealed class BridgeRunner
         var thinkingTicker  = Task.Run(() => ThinkingTickerAsync(ct), ct);
         var serialMonitor   = Task.Run(() => SerialMonitorAsync(ct), ct);
         var collisionTicker = Task.Run(() => CollisionTickerAsync(ct), ct);
+        var pinger          = Task.Run(() => PingerAsync(ct), ct);
         try
         {
             await SubscriptionManagerAsync(ct);
@@ -107,6 +108,7 @@ public sealed class BridgeRunner
             try { await thinkingTicker; }  catch { }
             try { await serialMonitor; }   catch { }
             try { await collisionTicker; } catch { }
+            try { await pinger; }          catch { }
         }
     }
 
@@ -544,6 +546,115 @@ public sealed class BridgeRunner
                 _lastCollisionHint[slot] = now;
                 Log.Info($"[bridge] collision-hint -> {json}");
             }
+        }
+    }
+
+    // ============================================================
+    // PING / PONG liveness ticker (FIRMWARE.md §8 v1.2)
+    //
+    // Sends `{"type":"ping","seq":N,"ts":...}` every PingIntervalMs and
+    // listens for matching pongs via SerialOutput's LineReceived event.
+    // If the most recent ping doesn't get acked within PingTimeoutMs of
+    // its send, the missed counter increments. Crossing
+    // PingMissedThreshold logs `device unresponsive` ONCE; recovery
+    // logs `device responsive again` ONCE. Routine ping/pong traffic is
+    // intentionally NOT logged — would noise up the log file at one
+    // line per cycle. State updates keep flowing through SerialMonitor
+    // regardless of pong arrival; PING/PONG is purely informational.
+    // ============================================================
+
+    private readonly object _pingLock = new();
+    private long _lastSeqSent;
+    private long _lastSeqAcked;
+    private DateTimeOffset? _lastPingSentAt;
+    private int _pingMissedConsecutive;
+    private bool _pingWarned;
+
+    private async Task PingerAsync(CancellationToken ct)
+    {
+        void OnLine(JsonNode doc)
+        {
+            if (doc["type"]?.GetValue<string>() != "pong") return;
+            var seqValue = doc["seq"];
+            if (seqValue is null) return;
+            long seq;
+            try { seq = seqValue.GetValue<long>(); }
+            catch
+            {
+                try { seq = seqValue.GetValue<int>(); }
+                catch { return; }
+            }
+            lock (_pingLock)
+            {
+                if (seq > _lastSeqAcked) _lastSeqAcked = seq;
+            }
+        }
+        _serial.LineReceived += OnLine;
+
+        var pingInterval = TimeSpan.FromMilliseconds(_options.PingIntervalMs);
+        var pingTimeout  = TimeSpan.FromMilliseconds(_options.PingTimeoutMs);
+        var threshold    = _options.PingMissedThreshold;
+
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                // Evaluate ack-status of the most recent ping.
+                lock (_pingLock)
+                {
+                    if (_lastPingSentAt is not null)
+                    {
+                        var elapsed = DateTimeOffset.Now - _lastPingSentAt.Value;
+                        var acked   = _lastSeqAcked >= _lastSeqSent;
+
+                        if (!acked && elapsed > pingTimeout)
+                        {
+                            _pingMissedConsecutive++;
+                            if (_pingMissedConsecutive == threshold && !_pingWarned)
+                            {
+                                Log.Warn($"[bridge] device unresponsive ({_pingMissedConsecutive} missed pongs)");
+                                _pingWarned = true;
+                            }
+                        }
+                        else if (acked)
+                        {
+                            if (_pingWarned)
+                            {
+                                Log.Info("[bridge] device responsive again");
+                                _pingWarned = false;
+                            }
+                            _pingMissedConsecutive = 0;
+                        }
+                    }
+                }
+
+                // Send a fresh ping if the port is open.
+                if (_serial.IsOpen)
+                {
+                    long seq;
+                    lock (_pingLock)
+                    {
+                        seq = ++_lastSeqSent;
+                        _lastPingSentAt = DateTimeOffset.Now;
+                    }
+                    var ts = DateTimeOffset.Now.ToUnixTimeMilliseconds() / 1000.0;
+                    var ping = new JsonObject
+                    {
+                        ["type"] = "ping",
+                        ["seq"]  = seq,
+                        ["ts"]   = ts,
+                    };
+                    // Don't log; per-5s noise would drown the rest of the log.
+                    _serial.WriteLine(ping.ToJsonString());
+                }
+
+                try { await Task.Delay(pingInterval, ct); }
+                catch (OperationCanceledException) { break; }
+            }
+        }
+        finally
+        {
+            _serial.LineReceived -= OnLine;
         }
     }
 

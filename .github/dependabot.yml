@@ -1,0 +1,42 @@
+version: 2
+
+# Workflow actions and NuGet packages should ideally be pinned to commit SHAs
+# (not tags) for supply-chain security. Dependabot rewrites both the SHA and
+# the trailing version comment when bumping. Cadence is weekly so minor/patch
+# bumps accumulate into one PR — but major bumps fall outside the group and
+# land as their own PRs so release notes get individual review (a bundle of
+# seven majors is too much surface to vet in one go).
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Indiana/Indianapolis"
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "nuget"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Indiana/Indianapolis"
+    commit-message:
+      prefix: "deps"
+    groups:
+      nuget-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

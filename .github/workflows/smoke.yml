@@ -1,0 +1,47 @@
+name: Smoke build (weekly)
+
+# Reactive safety net: rebuild on the currently-pinned .NET SDK and the
+# currently-pinned NuGet package versions. If anything in the supply chain
+# breaks (a NuGet package vanishes, the SDK image moves, a transitive dep
+# disappears), this fires red mail before a user hits it. No release
+# artifacts are produced — purely a "does it still compile" canary on
+# current pins.
+#
+# Distinct from pr.yml: pr.yml runs against the diff under review;
+# smoke.yml runs against `main` on a fixed cadence to catch ambient drift
+# that PRs don't.
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"  # Mondays 09:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: smoke
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Smoke (${{ matrix.rid }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: macos-latest
+            rid: osx-x64
+          - os: macos-latest
+            rid: osx-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Publish
+        run: dotnet publish -c Release -r ${{ matrix.rid }} -o out/${{ matrix.rid }}

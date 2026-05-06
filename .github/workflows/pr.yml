@@ -1,0 +1,91 @@
+name: PR check
+
+# Per-PR signal that exercises the parts of the release pipeline we can run
+# without actually publishing anything: dotnet build per RID, a vulnerable-
+# package scan, and a version.txt sanity check.
+#
+# What this DOES NOT cover (only a real release exercises these):
+#   - NSIS installer build      (Windows; needs makensis on PATH)
+#   - .app bundle + .dmg build  (macOS; needs codesign + hdiutil)
+#   - AppImage build            (Linux; needs appimagetool + ImageMagick)
+#   - softprops/action-gh-release (creates the actual GitHub Release)
+#
+# For PRs that bump anything inside those install-builder paths, do a dry-run
+# release on a throwaway tag against the dependabot branch before merging.
+# See MAINTENANCE.md.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: pr-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (${{ matrix.rid }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: macos-latest
+            rid: osx-x64
+          - os: macos-latest
+            rid: osx-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Build
+        run: dotnet build -c Release
+
+      - name: Publish (smoke-test the publish path used at release time)
+        run: dotnet publish -c Release -r ${{ matrix.rid }} -o out/${{ matrix.rid }}
+
+  vuln-scan:
+    name: Vulnerable-package scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore (so listing works against the lockfile)
+        run: dotnet restore
+
+      - name: Check for vulnerable transitive packages
+        run: |
+          set -euo pipefail
+          output=$(dotnet list package --vulnerable --include-transitive 2>&1)
+          echo "$output"
+          if echo "$output" | grep -qE "has the following vulnerable packages"; then
+            echo "::error::Vulnerable packages reintroduced — see output above."
+            exit 1
+          fi
+
+  version-sanity:
+    name: version.txt parses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify version.txt is a parseable semver
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < version.txt)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::version.txt is not a valid semver: '$version'"
+            exit 1
+          fi
+          echo "version: $version"

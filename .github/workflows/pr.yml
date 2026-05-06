@@ -39,7 +39,7 @@ jobs:
             rid: osx-arm64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -55,7 +55,7 @@ jobs:
     name: Vulnerable-package scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -78,7 +78,7 @@ jobs:
     name: version.txt parses
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Verify version.txt is a parseable semver
         run: |

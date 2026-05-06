@@ -126,7 +126,7 @@ jobs:
           ls -la *.AppImage
 
       - name: Upload raw binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bridge-${{ matrix.rid }}
           path: out/${{ matrix.rid }}/ClaudeStatusBridge-${{ matrix.rid }}${{ matrix.exe_suffix }}
@@ -134,7 +134,7 @@ jobs:
 
       - name: Upload Windows installer
         if: matrix.rid == 'win-x64'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: installer-${{ matrix.rid }}
           path: installer/windows/ClaudePanelBridge-*-Setup.exe
@@ -142,7 +142,7 @@ jobs:
 
       - name: Upload macOS .dmg
         if: startsWith(matrix.rid, 'osx-')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: installer-${{ matrix.rid }}
           path: ClaudePanelBridge-*-${{ matrix.rid }}.dmg
@@ -150,7 +150,7 @@ jobs:
 
       - name: Upload Linux AppImage
         if: matrix.rid == 'linux-x64'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: installer-${{ matrix.rid }}
           path: ClaudePanelBridge-*-x86_64.AppImage

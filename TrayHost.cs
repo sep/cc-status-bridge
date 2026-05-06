@@ -35,9 +35,17 @@ internal static class TrayHost
     private static NativeMenu?     _connectDeviceMenu;
     private static CancellationTokenSource? _scannerCts;
 
-    public static void AttachTo(Application app, IClassicDesktopStyleApplicationLifetime desktop)
+    public static void AttachTo(Application app, IClassicDesktopStyleApplicationLifetime desktop, string[] args)
     {
         _desktop = desktop;
+
+        // Friendly CLI mappings layered on top of the standard
+        // --Bridge:Key=Value form. New mappings here = new short flags
+        // exposed to users without touching the rest of the pipeline.
+        var cliMappings = new Dictionary<string, string>
+        {
+            { "--ping-interval-ms", "Bridge:PingIntervalMs" },
+        };
 
         var config = new Microsoft.Extensions.Configuration.ConfigurationBuilder()
             .SetBasePath(AppContext.BaseDirectory)
@@ -48,6 +56,9 @@ internal static class TrayHost
                     "appsettings.json"),
                 optional: true, reloadOnChange: false)
             .AddEnvironmentVariables(prefix: "CSB_")
+            // Last source wins — CLI overrides env which overrides JSON.
+            // Standard precedence ordering for diagnostic toggles.
+            .AddCommandLine(args, cliMappings)
             .Build();
         _options = new BridgeOptions();
         config.GetSection("Bridge").Bind(_options);

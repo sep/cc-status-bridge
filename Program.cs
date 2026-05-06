@@ -94,11 +94,23 @@ static void PrintHelp()
         "  macOS:   launchd LaunchAgent under ~/Library/LaunchAgents/\n" +
         "  Linux:   systemd --user unit under ~/.config/systemd/user/\n" +
         "\n" +
-        "Configuration (appsettings.json / CLI / CSB_ env):\n" +
-        "  Bridge:ComPort             (default COM4)\n" +
-        "  Bridge:BaudRate            (default 115200)\n" +
-        "  Bridge:MirrorDir           (explicit override; default = auto-discover)\n" +
-        "  Bridge:RescanIntervalMs    (default 5000)\n" +
-        "  Bridge:ThinkingIdleMs      (default 8000)\n" +
-        "  Bridge:SerialPollIntervalMs (default 2000)\n");
+        "Configuration sources (later sources override earlier):\n" +
+        "  1. appsettings.json (next to the binary, or in the cwd)\n" +
+        "  2. Environment variables prefixed CSB_ (e.g. CSB_BRIDGE__COMPORT=COM5)\n" +
+        "  3. Command-line arguments to the tray launch\n" +
+        "\n" +
+        "Tray launch CLI flags:\n" +
+        "  --ping-interval-ms <N>     PING/PONG interval in ms (0 = disable)\n" +
+        "  --Bridge:<Key>=<Value>     Generic override for any Bridge:* option\n" +
+        "\n" +
+        "Bridge:* options (default in parentheses):\n" +
+        "  Bridge:ComPort                 (\"\" — picker prompts on first run)\n" +
+        "  Bridge:BaudRate                (115200)\n" +
+        "  Bridge:MirrorDir               (\"\" — auto-discover)\n" +
+        "  Bridge:RescanIntervalMs        (5000)\n" +
+        "  Bridge:ThinkingIdleMs          (8000)\n" +
+        "  Bridge:SerialPollIntervalMs    (2000)\n" +
+        "  Bridge:PingIntervalMs          (5000; set 0 to disable PING/PONG)\n" +
+        "  Bridge:PingTimeoutMs           (2000)\n" +
+        "  Bridge:PingMissedThreshold     (3)\n");
 }

@@ -24,7 +24,10 @@ public sealed class TrayApp : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             desktop.ShutdownMode = ShutdownMode.OnExplicitShutdown;
-            TrayHost.AttachTo(this, desktop);
+            // Forward the tray-launch args to TrayHost so it can layer
+            // them onto the configuration pipeline (CLI flags override
+            // appsettings.json + env vars for any Bridge:* option).
+            TrayHost.AttachTo(this, desktop, desktop.Args ?? Array.Empty<string>());
         }
         base.OnFrameworkInitializationCompleted();
     }

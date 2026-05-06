@@ -572,6 +572,15 @@ public sealed class BridgeRunner
 
     private async Task PingerAsync(CancellationToken ct)
     {
+        // Explicit off-switch: a non-positive PingIntervalMs disables
+        // the pinger entirely. Useful when the firmware deployed on the
+        // device doesn't implement §8 v1.1+ PING/PONG dispatch — the
+        // ping line falling into some firmware "unknown line" path can
+        // have visual side effects (state revert, render glitches).
+        // Set Bridge.PingIntervalMs=0 in appsettings.json (or
+        // CSB_BRIDGE__PINGINTERVALMS=0 env var) to turn the pinger off.
+        if (_options.PingIntervalMs <= 0) return;
+
         void OnLine(JsonNode doc)
         {
             if (doc["type"]?.GetValue<string>() != "pong") return;

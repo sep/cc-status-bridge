@@ -653,8 +653,13 @@ public sealed class BridgeRunner
                         ["seq"]  = seq,
                         ["ts"]   = ts,
                     };
-                    // Don't log; per-5s noise would drown the rest of the log.
-                    _serial.WriteLine(ping.ToJsonString());
+                    var pingJson = ping.ToJsonString();
+                    // TEMP DIAGNOSTIC (revert with `git revert`): log every
+                    // ping send so we can correlate bridge activity with
+                    // panel behavior. Drops back to silent in normal
+                    // operation per the original design.
+                    Log.Info($"[bridge] PING -> {pingJson}");
+                    _serial.WriteLine(pingJson);
                 }
 
                 try { await Task.Delay(pingInterval, ct); }

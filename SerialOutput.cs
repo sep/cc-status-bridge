@@ -101,19 +101,30 @@ public sealed class SerialOutput : IDisposable
     {
         SerialPort? port;
         CancellationTokenSource? readerCts;
+        Task? readerTask;
         lock (_lock)
         {
             port = _port;
             _port = null;
             readerCts = _readerCts;
             _readerCts = null;
-            // _readerTask is intentionally not nulled here; closing the
-            // port will make its ReadLine throw, the task exits on its
-            // own. Nothing awaits it.
+            readerTask = _readerTask;
+            _readerTask = null;
         }
         try { readerCts?.Cancel(); } catch { }
-        try { readerCts?.Dispose(); } catch { }
         if (port is not null) ClosePortBestEffort(port);
+
+        // Now that the port handle is gone, the reader's pending
+        // ReadLine throws and the loop exits. Wait briefly so callers
+        // (TryOpen on resume, ChangeComPort, etc.) don't race a
+        // straggler reader from a previous open. Loop pulses every
+        // 200ms; 1s gives 5 windows of headroom — typically exits in
+        // the first one.
+        if (readerTask is not null)
+        {
+            try { readerTask.Wait(TimeSpan.FromSeconds(1)); } catch { }
+        }
+        try { readerCts?.Dispose(); } catch { }
     }
 
     /// <summary>
@@ -169,22 +180,15 @@ public sealed class SerialOutput : IDisposable
                 };
                 _port.Open();
                 port = _port;
-                // Reader is only useful when something downstream listens
-                // for `LineReceived` events. Today the sole consumer is
-                // BridgeRunner.PingerAsync (looking for pong replies), and
-                // that early-exits when PingIntervalMs <= 0. Don't start a
-                // reader nobody will consume — and avoid the continuous
-                // ReadLine() activity, which has been observed to alter
-                // some firmware/USB-CDC behavior in disconnected state.
-                if (_options.PingIntervalMs > 0)
-                {
-                    _readerCts = new CancellationTokenSource();
-                    cts = _readerCts;
-                }
-                else
-                {
-                    cts = null;
-                }
+                // Reader runs whenever the port is open, regardless of
+                // whether anything is currently subscribed to its
+                // LineReceived event. Cheap (200ms ReadLine timeouts +
+                // a JsonNode.Parse on each line) and keeps the lifecycle
+                // simple — open ↔ reader, close ↔ no reader. Subscribers
+                // (currently just PingerAsync looking for pongs) wire up
+                // independently.
+                _readerCts = new CancellationTokenSource();
+                cts = _readerCts;
             }
             catch (Exception ex)
             {
@@ -196,11 +200,13 @@ public sealed class SerialOutput : IDisposable
                 return false;
             }
         }
-        // Started outside the lock to avoid holding the lock across the
-        // Task.Run call (cheap but a clean discipline). Skipped entirely
-        // when reader is disabled per the PingIntervalMs<=0 branch above.
-        if (cts is not null)
-            _readerTask = Task.Run(() => ReaderLoop(port, cts.Token));
+        // Start the reader outside the lock (cheap discipline — Task.Run
+        // hops to the thread pool), then re-acquire the lock to publish
+        // the task handle. The intermediate gap is bounded by the lock
+        // around _readerTask access in CloseIfOpen, so a concurrent
+        // close can't lose the reference.
+        var task = Task.Run(() => ReaderLoop(port, cts.Token));
+        lock (_lock) { _readerTask = task; }
         return true;
     }
 

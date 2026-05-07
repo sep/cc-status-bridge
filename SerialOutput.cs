@@ -229,12 +229,6 @@ public sealed class SerialOutput : IDisposable
 
             if (string.IsNullOrEmpty(line)) continue;
 
-            // TEMP DIAGNOSTIC (revert with `git revert`): log every
-            // line received from the device, both parseable and
-            // garbage. We need to see what the firmware is actually
-            // sending — if anything — when the panel goes wonky.
-            Log.Info($"[bridge] RECV <- {line}");
-
             // Tolerate non-JSON garbage (firmware boot logs, partial
             // frames, etc.) — drop without complaint.
             JsonNode? doc;

@@ -63,28 +63,37 @@ public sealed class SerialOutput : IDisposable
         }
         if (!listed) return false;
 
-        // Step 2: if we already hold it open, the device is definitely there.
+        // Steps 2 & 3 both touch the OS port handle and need to coordinate
+        // with TryOpen running on another thread. Without this lock the
+        // throwaway probe in Step 3 briefly holds the OS handle exclusively
+        // — and a concurrent TryOpen() (from Pinger, the state-line emit
+        // path, etc.) would land on `Access to the path 'COM4' is denied`
+        // for the duration of the probe. Locking serialises them; lock
+        // hold time is bounded by the probe's open+close round-trip
+        // (single-digit ms in the success case) so contention is
+        // negligible.
         lock (_lock)
         {
+            // Step 2: if we already hold it open, the device is definitely there.
             if (_port?.IsOpen == true) return true;
-        }
 
-        // Step 3: port is listed but we don't hold it — confirm with a
-        // throwaway open-close. This catches the "phantom COM port" case
-        // where the registry still lists the name after the USB device
-        // was unplugged.
-        try
-        {
-            using var probe = new SerialPort(_options.ComPort, _options.BaudRate);
-            probe.ReadTimeout = 100;
-            probe.WriteTimeout = 100;
-            probe.Open();
-            probe.Close();
-            return true;
-        }
-        catch
-        {
-            return false;
+            // Step 3: port is listed but we don't hold it — confirm with a
+            // throwaway open-close. This catches the "phantom COM port"
+            // case where the registry still lists the name after the USB
+            // device was unplugged.
+            try
+            {
+                using var probe = new SerialPort(_options.ComPort, _options.BaudRate);
+                probe.ReadTimeout = 100;
+                probe.WriteTimeout = 100;
+                probe.Open();
+                probe.Close();
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
     }
 

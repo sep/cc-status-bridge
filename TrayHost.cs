@@ -438,12 +438,65 @@ internal static class TrayHost
     // Quit
     // ============================================================
 
+    private static int _quitInFlight;
+
     private static void Quit()
     {
-        // Best-effort: stop the scanner + bridge, then shutdown Avalonia.
+        // Re-entry guard — Ctrl+C twice or "Quit" then Ctrl+C should
+        // not double-fire the teardown.
+        if (Interlocked.Exchange(ref _quitInFlight, 1) != 0) return;
+
+        // Timing instrumentation: each phase logs its elapsed wall-clock
+        // duration so we can see which step actually eats the time when
+        // exit feels slow. Cheap to leave in — runs once per process
+        // life, only on shutdown.
+        var total = System.Diagnostics.Stopwatch.StartNew();
+        Log.Info("[bridge] quit: begin");
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         try { _scannerCts?.Cancel(); } catch { }
+        Log.Info($"[bridge] quit: scanner cts cancel done ({sw.ElapsedMilliseconds}ms)");
+
+        sw.Restart();
         try { _runnerCts?.Cancel(); } catch { }
+        Log.Info($"[bridge] quit: runner cts cancel done ({sw.ElapsedMilliseconds}ms)");
+
+        sw.Restart();
         try { _serial?.Dispose(); } catch { }
-        Dispatcher.UIThread.Post(() => _desktop?.Shutdown());
+        Log.Info($"[bridge] quit: serial dispose done ({sw.ElapsedMilliseconds}ms)");
+
+        // Avalonia shutdown happens on the UI thread; we Post the request
+        // and don't block here. The total elapsed below is the time TO
+        // request shutdown, not the time the runtime takes to actually
+        // exit. If the process keeps living after this line, it's
+        // Avalonia's event loop draining or the .NET runtime waiting on
+        // non-background work.
+        sw.Restart();
+        Dispatcher.UIThread.Post(() =>
+        {
+            var ssw = System.Diagnostics.Stopwatch.StartNew();
+            try { _desktop?.Shutdown(); } catch { }
+            Log.Info($"[bridge] quit: desktop.Shutdown() returned ({ssw.ElapsedMilliseconds}ms)");
+        });
+        Log.Info($"[bridge] quit: posted desktop.Shutdown ({sw.ElapsedMilliseconds}ms); total Quit() body {total.ElapsedMilliseconds}ms");
+    }
+
+    /// <summary>
+    /// Wire Ctrl+C / SIGINT through the same orchestrated Quit() path
+    /// the tray menu uses, so a terminal-launched bridge tears down
+    /// deterministically and the timing log is captured for both
+    /// shutdown vectors.
+    /// </summary>
+    public static void InstallSignalHandlers()
+    {
+        Console.CancelKeyPress += (_, e) =>
+        {
+            // Cancel the runtime's default abort-the-process behavior
+            // so our Quit() can run to completion. The runtime exits
+            // once Avalonia's event loop returns.
+            e.Cancel = true;
+            Log.Info("[bridge] Console.CancelKeyPress received");
+            Quit();
+        };
     }
 }

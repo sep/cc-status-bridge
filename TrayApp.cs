@@ -24,6 +24,11 @@ public sealed class TrayApp : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             desktop.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            // Wire Ctrl+C / SIGINT to TrayHost.Quit() so terminal-launched
+            // bridges tear down through the same orchestrated path the
+            // tray menu uses — and the timing log lands for that vector
+            // too.
+            TrayHost.InstallSignalHandlers();
             // Forward the tray-launch args to TrayHost so it can layer
             // them onto the configuration pipeline (CLI flags override
             // appsettings.json + env vars for any Bridge:* option).

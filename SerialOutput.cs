@@ -168,9 +168,23 @@ public sealed class SerialOutput : IDisposable
                     RtsEnable = false,
                 };
                 _port.Open();
-                _readerCts = new CancellationTokenSource();
                 port = _port;
-                cts = _readerCts;
+                // Reader is only useful when something downstream listens
+                // for `LineReceived` events. Today the sole consumer is
+                // BridgeRunner.PingerAsync (looking for pong replies), and
+                // that early-exits when PingIntervalMs <= 0. Don't start a
+                // reader nobody will consume — and avoid the continuous
+                // ReadLine() activity, which has been observed to alter
+                // some firmware/USB-CDC behavior in disconnected state.
+                if (_options.PingIntervalMs > 0)
+                {
+                    _readerCts = new CancellationTokenSource();
+                    cts = _readerCts;
+                }
+                else
+                {
+                    cts = null;
+                }
             }
             catch (Exception ex)
             {
@@ -183,8 +197,10 @@ public sealed class SerialOutput : IDisposable
             }
         }
         // Started outside the lock to avoid holding the lock across the
-        // Task.Run call (cheap but a clean discipline).
-        _readerTask = Task.Run(() => ReaderLoop(port, cts.Token));
+        // Task.Run call (cheap but a clean discipline). Skipped entirely
+        // when reader is disabled per the PingIntervalMs<=0 branch above.
+        if (cts is not null)
+            _readerTask = Task.Run(() => ReaderLoop(port, cts.Token));
         return true;
     }
 

@@ -5,6 +5,11 @@ title: ClaudePanel Bridge
 
 # ClaudePanel Bridge
 
+> **Not sure where to start?** Begin at the
+> [plugin site](https://sep.github.io/cc-status-plugin/) — that's the
+> system overview and install walkthrough that gets your Claude Code
+> session talking to the panel.
+
 The bridge is the cross-platform tray app that connects Claude Code to
 your ClaudePanel hardware. It subscribes to the [ClaudePanel
 plugin](https://sep.github.io/cc-status-plugin/)'s local broker, watches
@@ -166,7 +171,9 @@ ESP32-S3 in, then either:
 
 The bridge runs in the background. To see it working:
 
-1. Plug your ESP32-S3 ClaudePanel hardware in via USB.
+1. Plug your ESP32-S3 ClaudePanel hardware in via USB. Don't have one
+   yet? Head to the [firmware site](https://sep.github.io/cc-status-display/)
+   for a one-click flasher and a parts list.
 2. Right-click the tray icon → use **Connect device** to pick the
    detected ClaudePanel (or run `find` from a terminal).
 3. Send a prompt in any Claude Code session that has the
@@ -211,6 +218,11 @@ Start-Process -Wait `
 | `logs`             | Tail the bridge log (Ctrl-C to exit).               |
 | `help`             | Show usage.                                         |
 
-## Source
+## Related projects
 
-<https://github.com/sep/cc-status-bridge>
+- **[Plugin](https://sep.github.io/cc-status-plugin/)** — system entry
+  point; install starts here.
+- **[Firmware](https://sep.github.io/cc-status-display/)** — flashing
+  guide and pre-built binaries for the ESP32-S3 display.
+- **[Bridge source](https://github.com/sep/cc-status-bridge)** — this
+  app's repo, for issues and code.

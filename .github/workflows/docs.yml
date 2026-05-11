@@ -1,0 +1,84 @@
+name: Deploy docs
+
+# Re-publishes the GitHub Pages site whenever docs/** changes on main, or
+# when a release is published. Stamps the latest release's tag + version
+# into _config.yml so the installer download links in index.md resolve to
+# the correctly-versioned binary every time the site rebuilds.
+#
+# Without this, the bridge site would either have to point at the generic
+# /releases/latest landing (forcing the user to find their file) or
+# hardcode a version that goes stale on the next bump. Direct-link UX
+# while keeping version-bearing asset filenames.
+#
+# Pages source needs to be set to "GitHub Actions" (Settings → Pages) for
+# this workflow to publish; the prior "Deploy from a branch" config has
+# to be disabled or it will race this workflow.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# Only one Pages deploy at a time. A release publish that lands during a
+# docs/** push (or vice versa) waits rather than racing the deploy.
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  publish:
+    name: Build site + deploy Pages
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy-pages.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Stamp the latest release tag into _config.yml
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          LATEST_TAG=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "::warning::No releases yet; installer links in the index will fall back to the generic /releases page."
+            VERSION=""
+          else
+            # Strip leading 'v' so the tag (vX.Y.Z) pairs with the bare
+            # version embedded in the asset filenames (X.Y.Z).
+            VERSION="${LATEST_TAG#v}"
+          fi
+          {
+            echo ""
+            echo "# Stamped at deploy time by .github/workflows/docs.yml"
+            echo "bridge_version: \"$VERSION\""
+            echo "bridge_release_tag: \"$LATEST_TAG\""
+          } >> docs/_config.yml
+          echo "--- _config.yml after stamping ---"
+          tail -5 docs/_config.yml
+
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b  # v5.0.0
+
+      - name: Build Jekyll site (Cayman theme)
+        uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697  # v1.0.13
+        with:
+          source: ./docs
+          destination: ./_site
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: _site
+
+      - id: deploy-pages
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128  # v5.0.0

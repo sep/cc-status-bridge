@@ -7,6 +7,13 @@ theme: jekyll-theme-cayman
 
 show_downloads: false
 
+# Stamped at deploy time by .github/workflows/docs.yml — kept empty by
+# default so a local `bundle exec jekyll serve` build still works.
+# Installer links in index.md fall back to the generic /releases page
+# when these are unset.
+bridge_version: ""
+bridge_release_tag: ""
+
 markdown: kramdown
 kramdown:
   syntax_highlighter: rouge

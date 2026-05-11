@@ -71,9 +71,15 @@ starts on login, runs in the background, and survives reboots.
 
   <div class="os-tab-content" data-os="windows" role="tabpanel">
     <h3>Windows (x64)</h3>
+    {% if site.bridge_release_tag != "" %}
+    <p>Download
+       <a href="https://github.com/sep/cc-status-bridge/releases/download/{{ site.bridge_release_tag }}/ClaudePanelBridge-{{ site.bridge_version }}-Setup.exe"><code>ClaudePanelBridge-{{ site.bridge_version }}-Setup.exe</code></a>
+       and double-click it.</p>
+    {% else %}
     <p>Download <code>ClaudePanelBridge-*-Setup.exe</code> from the
        <a href="https://github.com/sep/cc-status-bridge/releases/latest">latest release</a>
        and double-click it.</p>
+    {% endif %}
     <p>Per-user install — no admin password needed. The installer drops
        the binary into <code>%LOCALAPPDATA%</code>, registers an entry in
        Apps &amp; Features, writes the standard
@@ -89,12 +95,20 @@ starts on login, runs in the background, and survives reboots.
 
   <div class="os-tab-content" data-os="macos" role="tabpanel">
     <h3>macOS (Apple Silicon or Intel)</h3>
+    {% if site.bridge_release_tag != "" %}
+    <p>Download the matching <code>.dmg</code>:</p>
+    <ul>
+      <li><a href="https://github.com/sep/cc-status-bridge/releases/download/{{ site.bridge_release_tag }}/ClaudePanelBridge-{{ site.bridge_version }}-osx-arm64.dmg"><code>ClaudePanelBridge-{{ site.bridge_version }}-osx-arm64.dmg</code></a> &mdash; Apple Silicon</li>
+      <li><a href="https://github.com/sep/cc-status-bridge/releases/download/{{ site.bridge_release_tag }}/ClaudePanelBridge-{{ site.bridge_version }}-osx-x64.dmg"><code>ClaudePanelBridge-{{ site.bridge_version }}-osx-x64.dmg</code></a> &mdash; Intel</li>
+    </ul>
+    {% else %}
     <p>Download the matching <code>.dmg</code> from the
        <a href="https://github.com/sep/cc-status-bridge/releases/latest">latest release</a>:</p>
     <ul>
       <li><code>ClaudePanelBridge-*-osx-arm64.dmg</code> &mdash; Apple Silicon</li>
       <li><code>ClaudePanelBridge-*-osx-x64.dmg</code> &mdash; Intel</li>
     </ul>
+    {% endif %}
     <p>Open the <code>.dmg</code>, drag <code>ClaudePanelBridge.app</code>
        into <code>Applications</code>, then double-click it. The app
        lives in your menu bar — there is no Dock icon.</p>
@@ -106,8 +120,13 @@ starts on login, runs in the background, and survives reboots.
 
   <div class="os-tab-content" data-os="linux" role="tabpanel">
     <h3>Linux (x64)</h3>
+    {% if site.bridge_release_tag != "" %}
+    <p>Download
+       <a href="https://github.com/sep/cc-status-bridge/releases/download/{{ site.bridge_release_tag }}/ClaudePanelBridge-{{ site.bridge_version }}-x86_64.AppImage"><code>ClaudePanelBridge-{{ site.bridge_version }}-x86_64.AppImage</code></a>.</p>
+    {% else %}
     <p>Download <code>ClaudePanelBridge-*-x86_64.AppImage</code> from
        the <a href="https://github.com/sep/cc-status-bridge/releases/latest">latest release</a>.</p>
+    {% endif %}
 <pre><code>chmod +x ClaudePanelBridge-*-x86_64.AppImage
 ./ClaudePanelBridge-*-x86_64.AppImage
 </code></pre>

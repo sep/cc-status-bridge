@@ -176,15 +176,21 @@ starts on login, runs in the background, and survives reboots.
 ## Find your hardware
 
 The bridge needs to know which USB serial port your ClaudePanel is on.
-The first time it can't find one, the tray icon stays gray. Plug your
-ESP32-S3 in, then either:
 
-- **Wait a few seconds** — the bridge re-scans known-good ports
-  periodically and will find a freshly-attached device on its own.
-- **Run find from a terminal** — `ClaudeStatusBridge find` scans every
-  plausible serial port, asks each one to identify itself, and writes
-  the chosen port into `appsettings.json` for you. See
-  [CLI usage](#cli-usage) below for the exact invocation on your OS.
+**On first run**, if no port is configured (fresh install, or
+`appsettings.json` missing / `Bridge:ComPort` empty), the bridge pops a
+**Connect device** dialog automatically before it even starts the tray
+icon. The dialog scans every plausible serial port the moment it opens,
+asks each one to identify itself, and shows you a list. Pick the
+matching ClaudePanel with a click — your choice is written into
+`appsettings.json` so subsequent launches go straight to the tray.
+
+**Later**, if you swap boards or want to re-pick, click
+**Connect device** in the tray menu — same scan, same dialog.
+
+For scripting, recovery, or headless setups, the same flow is available
+as a CLI subcommand (`ClaudeStatusBridge find`) — see
+[CLI usage](#cli-usage) below for the exact invocation on your OS.
 
 ## After install
 

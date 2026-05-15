@@ -113,15 +113,14 @@ public sealed class BridgeRunner
     }
 
     // ============================================================
-    // Subscription manager (multi-session, v0.2.0)
+    // Subscription manager (routes-only, v0.4)
     //
-    // Discovers every Claude session that has an active broker, opens a
-    // SUB stream to each one, and routes their events through HandleEvent
-    // (which already keys per-session state by session_id). Sessions
-    // that the user has explicitly hidden via /claude-status:hide are
-    // skipped entirely. Sessions with no route get displayed at the
-    // firmware's default slot (FIRMWARE.md §3.2). Sessions with explicit
-    // routes get their `client` field set in the wire protocol.
+    // Subscribes only to Claude sessions the user has explicitly bound
+    // to a slot via /claude-status:show. Sessions without a route entry
+    // in routes.json are ignored entirely — they never produce display
+    // output, no default slot, no auto-grab. /claude-status:hide is the
+    // inverse: it removes the session's route, which causes the next
+    // rescan to tear down that subscription.
     // ============================================================
 
     private sealed class ActiveSubscription
@@ -143,10 +142,10 @@ public sealed class BridgeRunner
                 // configure / reemit happen in SerialMonitorAsync.
                 if (!_serial.IsOpen) _serial.TryOpen();
 
+                var routes = _broker.ReadAllRoutes();
                 var endpoints = _broker.FindAllBrokers().ToList();
-                var hidden = _broker.ReadHiddenSessions();
                 var wanted = endpoints
-                    .Where(e => !hidden.Contains(e.SessionId))
+                    .Where(e => routes.ContainsKey(e.SessionId))
                     .ToList();
                 var wantedIds = new HashSet<string>(
                     wanted.Select(e => e.SessionId), StringComparer.Ordinal);
@@ -177,7 +176,7 @@ public sealed class BridgeRunner
                     };
                 }
 
-                // Tear down subscriptions for sessions that vanished or were hidden.
+                // Tear down subscriptions for sessions that vanished or had their route removed.
                 var toRemove = subs.Keys.Where(k => !wantedIds.Contains(k)).ToList();
                 foreach (var id in toRemove)
                 {
@@ -515,7 +514,6 @@ public sealed class BridgeRunner
     private void CheckCollisionsLocked(int activeWindowMs)
     {
         var now = DateTimeOffset.Now;
-        var defaultSlot = (_broker.ReadPanelLayout()?.FirstId ?? 1).ToString();
         var slotCounts = new Dictionary<string, int>(StringComparer.Ordinal);
 
         foreach (var session in _sessions.Values)
@@ -523,8 +521,11 @@ public sealed class BridgeRunner
             if (session.CurrentState is null) continue;
             if ((now - session.LastEmit).TotalMilliseconds > activeWindowMs) continue;
 
-            var slot = _broker.ReadRouteForSession(session.SessionId) ?? defaultSlot;
-            if (slot == "_hidden") continue;
+            // v0.4: every subscribed session has a route by construction
+            // (the subscription manager only subscribes to routed sessions).
+            // Skip if the route disappeared between rescans.
+            var slot = _broker.ReadRouteForSession(session.SessionId);
+            if (slot is null) continue;
 
             slotCounts[slot] = slotCounts.GetValueOrDefault(slot) + 1;
         }

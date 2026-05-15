@@ -17,7 +17,7 @@ public sealed class BrokerClient
 
     /// <summary>
     /// Yields every directory the bridge should inspect for broker state
-    /// (sessions/ subtrees and pin.json). Ordered by priority, de-duplicated.
+    /// (sessions/ subtrees and routes.json). Ordered by priority, de-duplicated.
     ///
     /// Priority:
     ///  1. Explicit <see cref="BridgeOptions.MirrorDir"/> override — if set,
@@ -118,13 +118,15 @@ public sealed class BrokerClient
     }
 
     /// <summary>
-    /// Set of session_ids the user has explicitly hidden via
-    /// /claude-status:hide. Encoded as routes.json entries with the
-    /// special slot value "_hidden".
+    /// Full session_id → slot map merged across all candidate data
+    /// roots. Used by the v0.4 subscription manager to decide which
+    /// brokers to subscribe to (we subscribe only to sessions the user
+    /// has explicitly bound via /claude-status:show — un-bound sessions
+    /// stay invisible to the display).
     /// </summary>
-    public HashSet<string> ReadHiddenSessions()
+    public Dictionary<string, string> ReadAllRoutes()
     {
-        var hidden = new HashSet<string>(StringComparer.Ordinal);
+        var merged = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var root in CandidateDataRoots())
         {
             var routesFile = Path.Combine(root, "routes.json");
@@ -135,14 +137,15 @@ public sealed class BrokerClient
                 {
                     foreach (var kvp in obj)
                     {
-                        if (kvp.Value?.GetValue<string>() == "_hidden")
-                            hidden.Add(kvp.Key);
+                        var slot = kvp.Value?.GetValue<string>();
+                        if (!string.IsNullOrWhiteSpace(slot))
+                            merged[kvp.Key] = slot;
                     }
                 }
             }
             catch { /* malformed; try next candidate */ }
         }
-        return hidden;
+        return merged;
     }
 
     public BrokerEndpoint? FindBrokerForSession(string sessionId)
@@ -153,26 +156,6 @@ public sealed class BrokerClient
             if (!File.Exists(stateFile)) continue;
             var endpoint = ReadEndpointFromStateFile(stateFile, fallbackSessionId: sessionId);
             if (endpoint is not null) return endpoint;
-        }
-        return null;
-    }
-
-    public string? ReadPinnedSessionId()
-    {
-        foreach (var root in CandidateDataRoots())
-        {
-            var pinFile = Path.Combine(root, "pin.json");
-            if (!File.Exists(pinFile)) continue;
-            try
-            {
-                var node = JsonNode.Parse(File.ReadAllText(pinFile));
-                var sid = node?["session_id"]?.GetValue<string>();
-                if (!string.IsNullOrWhiteSpace(sid)) return sid;
-            }
-            catch
-            {
-                // malformed pin file; try next candidate
-            }
         }
         return null;
     }
@@ -218,7 +201,7 @@ public sealed class BrokerClient
 
     /// <summary>
     /// Look up the display client slot for a session, written by the
-    /// plugin's /claude-status:route slash-command handler. Returns null
+    /// plugin's /claude-status:show slash-command handler. Returns null
     /// if no route is configured for this session.
     /// </summary>
     public string? ReadRouteForSession(string sessionId)
@@ -239,14 +222,6 @@ public sealed class BrokerClient
             }
         }
         return null;
-    }
-
-    public BrokerEndpoint? PickEndpoint()
-    {
-        var pinned = ReadPinnedSessionId();
-        if (pinned is not null)
-            return FindBrokerForSession(pinned);
-        return FindNewestBroker();
     }
 
     public async IAsyncEnumerable<string> StreamEvents(

@@ -36,7 +36,7 @@
     <!-- Avalonia for the system-tray UI (v0.2.2). Tray icon + native menu;
          no main window, ShutdownMode.OnExplicitShutdown lets the bridge
          keep running even when the user has no windows open. -->
-    <PackageReference Include="Avalonia" Version="11.2.7" />
+    <PackageReference Include="Avalonia" Version="12.0.5" />
     <PackageReference Include="Avalonia.Desktop" Version="11.2.7" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.7" />
 

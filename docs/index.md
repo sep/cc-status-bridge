@@ -205,6 +205,12 @@ The bridge runs in the background. To see it working:
    <a href="https://sep.github.io/cc-status-plugin/">ClaudePanel plugin</a>
    installed. The matrix should react.
 
+The tray menu also has **Resend panel config**, which re-reads the
+panel layout configured via `/claude-status:configure` and pushes it
+to the firmware immediately — useful right after changing the layout,
+or when no session is routed yet so there's no event traffic for the
+bridge to piggyback the change on.
+
 ## CLI usage
 
 The bridge is primarily a tray app — most users never need the

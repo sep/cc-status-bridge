@@ -418,6 +418,31 @@ public sealed class BridgeRunner
     // Configure pass-through (panel_layout.json -> firmware)
     // ============================================================
 
+    /// <summary>
+    /// Force a fresh read of panel_layout.json and send it to the
+    /// firmware even if unchanged. Backs the tray menu's "Resend panel
+    /// config" item: the automatic path only fires on session events or
+    /// device reconnect, so a layout configured while no session is
+    /// routed (first-time setup) has no event to ride on — and a manual
+    /// resend is also the right tool when the firmware missed one.
+    /// Returns a short human-readable outcome for the status label.
+    /// </summary>
+    public string ResendConfigure()
+    {
+        lock (_lock)
+        {
+            var layout = _broker.ReadPanelLayout();
+            if (layout is null)
+                return "no panel layout configured yet";
+            _lastConfiguredJson = null;  // treat as changed: always send
+            SendConfigureIfChangedLocked();
+            // Success path stamps _lastConfiguredJson; failure leaves it null.
+            return _lastConfiguredJson is not null
+                ? "panel config sent"
+                : "config send failed (see logs)";
+        }
+    }
+
     private void SendConfigureIfChangedLocked()
     {
         var layout = _broker.ReadPanelLayout();

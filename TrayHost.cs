@@ -30,6 +30,7 @@ internal static class TrayHost
 
     private static NativeMenuItem? _statusItem;
     private static NativeMenuItem? _pauseResumeItem;
+    private static NativeMenuItem? _resendConfigItem;
     private static NativeMenuItem? _autoRunItem;
     private static NativeMenuItem? _connectDeviceItem;
     private static NativeMenu?     _connectDeviceMenu;
@@ -106,6 +107,7 @@ internal static class TrayHost
         if (_pauseResumeItem is not null)   menu.Add(_pauseResumeItem);
         menu.Add(new NativeMenuItemSeparator());
         if (_connectDeviceItem is not null) menu.Add(_connectDeviceItem);
+        if (_resendConfigItem is not null)  menu.Add(_resendConfigItem);
         if (_autoRunItem is not null)       menu.Add(_autoRunItem);
         var showLogs = new NativeMenuItem("Show logs");
         showLogs.Click += (_, _) => OpenLogsWindow();
@@ -122,6 +124,8 @@ internal static class TrayHost
         _statusItem = new NativeMenuItem("Status: starting...") { IsEnabled = false };
         _pauseResumeItem = new NativeMenuItem("Pause subscription");
         _pauseResumeItem.Click += (_, _) => TogglePauseResume();
+        _resendConfigItem = new NativeMenuItem("Resend panel config");
+        _resendConfigItem.Click += (_, _) => ResendPanelConfig();
         _autoRunItem = new NativeMenuItem("Run on login")
         {
             ToggleType = NativeMenuItemToggleType.CheckBox,
@@ -226,6 +230,30 @@ internal static class TrayHost
     {
         if (_pauseResumeItem is null) return;
         _pauseResumeItem.Header = paused ? "Resume subscription" : "Pause subscription";
+    }
+
+    // ============================================================
+    // Resend panel config (tray shortcut for /claude-status:configure)
+    // ============================================================
+
+    private static void ResendPanelConfig()
+    {
+        var runner = _runner;
+        if (runner is null)
+        {
+            // Paused: there's no runner (and the serial port is
+            // released), so there is nothing to send with. Point the
+            // user at the resume action instead of failing silently.
+            Dispatcher.UIThread.Post(() =>
+                UpdateStatusLabel("Status: paused — resume subscription first"));
+            return;
+        }
+        Task.Run(() =>
+        {
+            var outcome = runner.ResendConfigure();
+            Dispatcher.UIThread.Post(() =>
+                UpdateStatusLabel($"Status: running — {outcome}"));
+        });
     }
 
     // ============================================================

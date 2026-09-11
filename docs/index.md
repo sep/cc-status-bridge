@@ -50,15 +50,15 @@ starts on login, runs in the background, and survives reboots.
   }
   .os-tab-button:hover { background: #eaeef2; color: #24292f; }
   .os-tab-button.active {
-    color: #24292f;
-    border-bottom-color: #159957;
+    color: #294175;
+    border-bottom-color: #294175;
     background: #fff;
   }
   .os-tab-content { display: none; padding: 1.25rem 1.5rem; }
   .os-tab-content.active { display: block; }
   .os-tab-content h3:first-child { margin-top: 0; }
-  .os-tab-content pre { background: #f6f8fa; padding: 0.75rem 1rem; border-radius: 6px; overflow-x: auto; }
-  .os-tab-content code { background: #eef1f4; padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.92em; }
+  .os-tab-content pre { background: #f1f5fe; padding: 0.75rem 1rem; border-radius: 6px; overflow-x: auto; }
+  .os-tab-content code { background: #e7edfd; padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.92em; }
   .os-tab-content pre code { background: transparent; padding: 0; }
 </style>
 

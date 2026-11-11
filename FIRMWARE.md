@@ -427,13 +427,17 @@ layout.
 
 ---
 
-## 8. Bidirectional protocol extension (v1.3)
+## 8. Bidirectional protocol extension (v1.3, v1.4)
 
 The v1.0 contract (§3) was unidirectional host→device. v1.1 added
 PING/PONG and RESYNC for liveness observability. v1.2 added runtime
 panel configuration and a user-facing identify command, and generalized
 the PONG shape to report multiple client slots. v1.3 adds the `hint`
-command for transient cross-session UX overlays.
+command for transient cross-session UX overlays. v1.4 adds the **remote
+link**: the device can hold an SSH session to a server of the user's
+choosing and accept bridges through it, and the bridge provisions that
+link over USB (`provision`, `keygen`, `pin_hostkey`, `tunnel_status`).
+See "Remote link over SSH (v1.4)" at the end of this section.
 
 All of this is **additive** — a v1.0 firmware that ignores unknown
 fields remains functional, it just won't answer pings, can't be
@@ -454,6 +458,14 @@ On every incoming line, parse JSON then dispatch by `type`:
 | `"configure"`       | Apply new panel layout at runtime, ack with `configured`. |
 | `"hint"`            | Render a transient overlay on the named client slot       |
 |                     | (see "Hints" below). v1.3.                                |
+| `"provision"`       | Store Wi-Fi / SSH settings for the remote link, ack with  |
+|                     | `provisioned`. **USB only.** v1.4.                        |
+| `"keygen"`          | Ensure the device has an SSH identity (create on first    |
+|                     | call), reply with `pubkey`. **USB only.** v1.4.           |
+| `"pin_hostkey"`     | Record (or clear) the server host-key fingerprint the     |
+|                     | device must see, ack with `provisioned`. **USB only.** v1.4. |
+| `"tunnel_status"`   | Report Wi-Fi + SSH link state, reply with `tunnel_status`.|
+|                     | Any transport. v1.4.                                      |
 | *(missing)*         | Legacy fallback: if a `state` field is present, treat as  |
 |                     | a v1 state update targeting the default client. Otherwise |
 |                     | ignore the line.                                          |
@@ -619,9 +631,17 @@ pinned client slot:
   recent PING, log `[bridge] device unresponsive (N missed pongs)` and
   continue. Do NOT stop forwarding state updates when pongs are
   missing — USB-CDC writes still happen. PING/PONG is informational.
-- On connect / reconnect, the bridge SHOULD emit a `configure` with
-  its intended layout. (Earlier drafts called for a follow-up `resync`;
-  the current bridge omits that — see RESYNC status note above.)
+- **Configure on mismatch (v1.4 rule, replaces "configure on every
+  connect").** The bridge sends `configure` only when the most recent
+  `pong` reports a `panel_count` / `first_id` different from its own
+  `panel_layout.json`, or when the user explicitly asks ("Resend panel
+  config"). Two bridges driving one device therefore never fight when
+  they agree, and make the panel flip visibly when they don't — the
+  right failure. (Earlier drafts called for a follow-up `resync`; the
+  current bridge omits that — see RESYNC status note above.)
+- On connect / reconnect over **any** transport, the bridge re-emits a
+  snapshot for every session it is subscribed to, so a device that
+  rebooted while the bridge was away catches up.
 - Bridge MAY publish device status to the broker later (as a separate
   metric) if we decide to surface device-offline state inside Claude.
 
@@ -644,6 +664,274 @@ echo '{"type":"configure","panel_count":2,"panel_width":64,"panel_height":32,"la
 
 echo '{"type":"configure","panel_count":9999}'                 > /dev/ttyACM0
 # Expect: no response (validation drop); display unchanged.
+```
+
+### Remote link over SSH (v1.4)
+
+#### Why and what
+
+Bridges and the device may have no direct network path (different
+VLANs, different sites). v1.4 lets the device dial **out** to an SSH
+server the user controls and request a *remote port forward*; each
+bridge dials **out** to the same server and connects to that forwarded
+port. Every bridge connection arrives at the device as its own SSH
+channel. Nothing is exposed on the server's public interface, and the
+only server-side requirement is an SSH account that permits forwarding.
+
+```
+ bridge A  ──ssh -L <local>:localhost:7777──▶ ┐
+                                              │ sshd  localhost:7777 ◀── remote forward ── device
+ bridge B  ──ssh -L <local>:localhost:7777──▶ ┘       (ONE listener)      (ONE session,
+                                                                            N channels)
+```
+
+**Transport equivalence.** A line arriving on an SSH channel is parsed
+and dispatched exactly as a line arriving over USB-Serial-JTAG, with
+these differences:
+
+- Replies (`pong`, `configured`, resync `state`, `tunnel_status`) go
+  back on the channel the request arrived on, never to another bridge.
+- `provision`, `keygen` and `pin_hostkey` are honoured **only over
+  USB**. Over an SSH channel they are answered with
+  `{"type":"provisioned","ok":false,"error":"usb_only"}` and otherwise
+  ignored. Rationale: these carry the Wi-Fi PSK and decide which server
+  the device trusts; physical access is the credential for changing them.
+- Unsolicited device→host events (`hostkey_seen`, spontaneous `state`)
+  are written to USB only. (Broadcasting to channels is a v1.5 candidate.)
+- The device sends nothing on an SSH channel except replies.
+
+Only the device ever requests the remote forward. Bridges are clients of
+it. A second *device* needs its own port.
+
+#### Persistent state (device side)
+
+Stored in NVS namespace `tunnel`, survives reboots, cleared only by
+`provision` / `keygen` / `pin_hostkey` or a flash erase:
+
+| Key | Set by | Notes |
+|---|---|---|
+| `wifi_ssid`, `wifi_psk` | `provision.wifi` | PSK never echoed back. |
+| `ssh_host`, `ssh_port`, `ssh_user`, `listen_port` | `provision.ssh` | |
+| `enabled` | `provision.enabled` | Default false. The link runs only when enabled **and** all of the above plus a key exist. |
+| `id_key` | `keygen` | ECDSA P-256 private key, PEM. Never leaves the device. |
+| `hostkey_fp` | `pin_hostkey` | `SHA256:<base64>` of the server host key the device must see. Absent = trust on first use (log + `hostkey_seen` only). |
+
+The device identity is ECDSA P-256 because that is the one key type the
+device's SSH library can both authenticate with and read in every
+on-the-wire format; RSA and ed25519 are not options here.
+
+#### Host → device messages (v1.4)
+
+**PROVISION** — set any subset of the link settings. Omitted objects and
+fields are left unchanged, so the bridge can update Wi-Fi without
+re-sending SSH settings and vice versa.
+
+```json
+{"type":"provision",
+ "wifi":{"ssid":"SEP-IoT","psk":"…"},
+ "ssh":{"host":"vm.example.net","port":22,"user":"claudepanel","listen_port":7777},
+ "enabled":true}
+```
+
+Validation (the whole message is rejected if any present field fails):
+`ssid` 1–32 bytes; `psk` empty (open network) or 8–63 bytes; `host`
+1–253 bytes; `port` and `listen_port` 1–65535; `user` 1–32 bytes;
+`enabled` boolean. Unlike `configure`, a rejected `provision` is **not**
+silent — the bridge UI needs to know — see `provisioned` below.
+
+Effect: settings are written to NVS, then applied immediately: if the
+Wi-Fi settings changed the station reconnects; if any SSH setting
+changed, or `enabled` changed, any live SSH session is dropped and the
+link state machine restarts with the new settings (or stops).
+
+**KEYGEN** — ensure the device has an identity and report its public half.
+
+```json
+{"type":"keygen"}
+{"type":"keygen","replace":true}
+```
+
+Without `replace`, an existing key is returned as-is; with it, a fresh
+key is generated and the old one discarded (the server's
+`authorized_keys` must then be updated — the reply says so via
+`"generated":true`). Generation takes well under a second on an
+ESP32-S3.
+
+**PIN_HOSTKEY** — record the server host-key fingerprint the device must
+see on every connect, or clear it.
+
+```json
+{"type":"pin_hostkey","fingerprint":"SHA256:1pB7…"}
+{"type":"pin_hostkey","fingerprint":null}
+```
+
+Accepted forms: `SHA256:` + unpadded base64 (as `ssh-keygen -lf` prints),
+or the bare base64. With a pin set, a mismatching server causes the
+device to disconnect **before authenticating** and report
+`hostkey_seen` with `"match":false`; it retries on the normal schedule
+in case the mismatch is transient (e.g. a DNS name pointing somewhere
+new during migration).
+
+**TUNNEL_STATUS** — query. No fields.
+
+```json
+{"type":"tunnel_status"}
+```
+
+#### Device → host messages (v1.4)
+
+**PROVISIONED** — ack for `provision` and `pin_hostkey` (and the
+refusal shape for USB-only commands received over SSH).
+
+```json
+{"type":"provisioned","ok":true,
+ "wifi":{"ssid":"SEP-IoT"},
+ "ssh":{"host":"vm.example.net","port":22,"user":"claudepanel","listen_port":7777},
+ "enabled":true,"has_key":true,"hostkey_pinned":true,
+ "uptime_ms":123456}
+```
+
+On rejection: `{"type":"provisioned","ok":false,"error":"<reason>",
+"uptime_ms":…}` where `<reason>` is one of `usb_only`, `bad_ssid`,
+`bad_psk`, `bad_host`, `bad_port`, `bad_user`, `bad_listen_port`,
+`bad_fingerprint`, `nvs_write_failed`.
+
+**PUBKEY** — reply to `keygen`.
+
+```json
+{"type":"pubkey",
+ "key":"ecdsa-sha2-nistp256 AAAAE2Vj… claudepanel-1cdbd493d258",
+ "fingerprint":"SHA256:…",
+ "authorized_keys_line":"restrict,port-forwarding,permitlisten=\"7777\" ecdsa-sha2-nistp256 AAAAE2Vj… claudepanel-1cdbd493d258",
+ "generated":false,
+ "uptime_ms":123456}
+```
+
+`authorized_keys_line` is what the user pastes on the server: forwarding
+only, no shell, and the device may bind only its own `listen_port`. The
+comment is `claudepanel-<sta mac, no colons>` so several devices stay
+distinguishable in one file. If `listen_port` is not yet provisioned,
+the line omits `permitlisten` and the reply carries
+`"warning":"listen_port not provisioned yet"`; the bridge runs
+`provision` before `keygen`, or re-runs `keygen` afterwards.
+
+**HOSTKEY_SEEN** — emitted on USB every time the device completes an SSH
+key exchange, pinned or not.
+
+```json
+{"type":"hostkey_seen","fingerprint":"SHA256:…","keytype":"ecdsa-sha2-nistp256",
+ "pinned":true,"match":true,"uptime_ms":123456}
+```
+
+`match` is `null` when no pin is set. The bridge's provisioning UI uses
+the first of these after `provision` to show the fingerprint and offer
+"Pin this host key"; the user compares it with `ssh-keygen -lf` on the
+server.
+
+**TUNNEL_STATUS** — reply to `tunnel_status`.
+
+```json
+{"type":"tunnel_status",
+ "enabled":true,"provisioned":true,"has_key":true,"hostkey_pinned":true,
+ "wifi":{"state":"up","ssid":"SEP-IoT","ip":"10.64.0.31","rssi":-61,
+         "mac":"1c:db:d4:93:d2:58"},
+ "ssh":{"state":"listening","host":"vm.example.net","port":22,
+        "user":"claudepanel","listen_port":7777,"clients":2,
+        "last_error":null},
+ "uptime_ms":123456}
+```
+
+`wifi.state` ∈ `off` (link disabled) · `down` · `associated` (no IP yet,
+usually DHCP in progress) · `up`. `ssh.state` ∈ `off` · `waiting_wifi` ·
+`connecting` · `hostkey_mismatch` · `auth_failed` · `forward_refused`
+(port already held by another session; see "Server requirements") ·
+`listening` · `down` (unexpected drop, retrying). `last_error` is the
+library's last message, for humans.
+
+**PONG (extended).** `pong` gains an optional compact summary so a bridge
+that only pings learns link health for free:
+
+```json
+"tunnel":{"wifi":"up","ssh":"listening","clients":2}
+```
+
+Absent on firmware without the remote link; bridges MUST tolerate its
+absence.
+
+#### Bridge behaviour (v1.4)
+
+- **Transport selection** is a bridge setting (`Bridge.Transport`:
+  `serial` | `ssh`). With `ssh`, the bridge runs the platform's OpenSSH
+  client headless:
+
+  ```
+  ssh -N -p <port>
+      -o BatchMode=yes -o ExitOnForwardFailure=yes
+      -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+      -o StrictHostKeyChecking=accept-new
+      -L <local>:localhost:<listen_port>  <user>@<host>
+  ```
+
+  then connects TCP to `127.0.0.1:<local>` and treats that stream as it
+  treats the serial port: NDJSON both ways, PING/PONG, re-emit on
+  (re)connect. If `ssh` exits, the bridge restarts it with backoff
+  (1 s doubling to 30 s). The user's own keys, agent and `~/.ssh/config`
+  apply; the bridge adds nothing to them.
+- **Provisioning flow** (USB attached): `keygen` → show
+  `authorized_keys_line` with a copy button → user pastes it on the
+  server → `provision` (with `enabled:true`) → wait for `hostkey_seen` →
+  show fingerprint, offer to pin → `pin_hostkey` → `tunnel_status` to
+  confirm `listening`. Then the bridge may switch its own transport to
+  `ssh` and the USB cable can go.
+- **Configure on mismatch** — see "Bridge behavior" above.
+- **Several bridges, one device**: supported by construction (one channel
+  each). Slot assignment is still per bridge via its own `routes.json`;
+  two bridges claiming the same slot is a known v1.4 gap (the firmware
+  cannot yet report it — v1.5 candidate: a device-originated `hint` when
+  two channels drive one slot).
+
+#### Server requirements
+
+- An SSH account the device and every bridge can reach; no shell needed.
+- `AllowTcpForwarding yes` (OpenSSH default). `GatewayPorts` stays `no`.
+- **`ClientAliveInterval 30` and `ClientAliveCountMax 3`, not optional.**
+  A device that drops off Wi-Fi leaves its session — and the forwarded
+  port — alive until TCP times out; without ClientAlive that can be hours,
+  and every reconnect in between gets `forward_refused`. With it the port
+  frees in ~90 s. To see who holds a port: `ss -ltnp | grep 7777` (Linux)
+  or `sockstat -4 -l | grep 7777` (FreeBSD).
+- `authorized_keys`: the device's line from `pubkey`; for each laptop
+  `restrict,port-forwarding,permitopen="localhost:7777" <laptop key>`.
+
+#### Security notes
+
+- Wi-Fi PSK and server settings cross only the USB cable, and only
+  changes made there are honoured. The device never echoes the PSK.
+- The private key is generated on the device and stored in NVS (v1.4);
+  NVS encryption / a PSA persistent key are follow-ups. Anyone with the
+  flash contents has the key; `restrict,permitlisten` on the server
+  limits what it is good for to binding one loopback port.
+- Host key pinning prevents a redirected DNS name from capturing the
+  device's session. Until pinned, first contact is trust-on-first-use,
+  surfaced to the user via `hostkey_seen`.
+- Any laptop key the server permits can drive the display. That is the
+  intended trust boundary: the server account *is* the display's ACL.
+
+#### Test recipe (USB, no bridge changes needed)
+
+```bash
+echo '{"type":"keygen"}'                                                          > /dev/ttyACM0
+# Expect: {"type":"pubkey","key":"ecdsa-sha2-nistp256 …","authorized_keys_line":"…","generated":true,…}
+echo '{"type":"provision","wifi":{"ssid":"…","psk":"…"},"ssh":{"host":"vm","port":22,"user":"claudepanel","listen_port":7777},"enabled":true}' > /dev/ttyACM0
+# Expect: {"type":"provisioned","ok":true,…} then, within ~30 s: {"type":"hostkey_seen",…,"pinned":false,"match":null}
+echo '{"type":"pin_hostkey","fingerprint":"SHA256:…"}'                           > /dev/ttyACM0
+# Expect: {"type":"provisioned","ok":true,…,"hostkey_pinned":true}
+echo '{"type":"tunnel_status"}'                                                   > /dev/ttyACM0
+# Expect: …"ssh":{"state":"listening",…}
+# From a laptop:
+ssh -N -L 7777:localhost:7777 claudepanel@vm &
+printf '{"type":"ping","seq":1}\n' | nc -q 2 localhost 7777
+# Expect: a pong, with "tunnel":{"wifi":"up","ssh":"listening","clients":1}
 ```
 
 ---

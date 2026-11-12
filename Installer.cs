@@ -153,6 +153,14 @@ internal static class Installer
     /// (via WriteComPortConfig) and the tray's "Connect device" submenu.
     /// </summary>
     public static bool TryWriteComPortConfig(string comPort, out string configPath, out string error)
+        => TryUpdateBridgeConfig(b => b["ComPort"] = comPort, out configPath, out error);
+
+    /// <summary>
+    /// Read-modify-write of the "Bridge" object in appsettings.json next to
+    /// the binary. The management window persists its choices through this
+    /// (transport, SSH settings, auto-assign, split panels).
+    /// </summary>
+    public static bool TryUpdateBridgeConfig(Action<System.Text.Json.Nodes.JsonObject> mutate, out string configPath, out string error)
     {
         var binaryDir = Path.GetDirectoryName(Environment.ProcessPath ?? "")
                         ?? AppContext.BaseDirectory;
@@ -182,7 +190,7 @@ internal static class Installer
             bridge = new System.Text.Json.Nodes.JsonObject();
             root["Bridge"] = bridge;
         }
-        bridge["ComPort"] = comPort;
+        mutate(bridge);
 
         try
         {

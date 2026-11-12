@@ -16,6 +16,21 @@ public sealed class BridgeRunner
     private readonly BridgeOptions _options;
     private readonly BrokerClient _broker;
     private readonly IDeviceLink _link;
+    private readonly RouteStore _routes;
+
+    public RouteStore Routes => _routes;
+
+    /// <summary>Every parsed JSON line from the device (pong, provisioned, pubkey, hostkey_seen, …).</summary>
+    public event Action<JsonNode>? DeviceLineReceived;
+
+    /// <summary>The most recent pong, for occupancy display. Null until one arrives.</summary>
+    public JsonNode? LatestPong { get; private set; }
+
+    public bool LinkIsOpen => _link.IsOpen;
+    public string LinkDescribe => _link.Describe;
+
+    /// <summary>Sessions the user never routed themselves get auto-assigned once; unrouting is respected after that.</summary>
+    private readonly HashSet<string> _autoAssigned = new(StringComparer.Ordinal);
 
     private readonly object _lock = new();
 
@@ -91,10 +106,66 @@ public sealed class BridgeRunner
         _options = options;
         _broker = broker;
         _link = link;
+        _routes = new RouteStore(broker, options);
+    }
+
+    // ============================================================
+    // Management surface (MANAGEMENT.md): what the window reads and does.
+    // ============================================================
+
+    public sealed record SessionInfo(
+        string SessionId, string? Cwd, DateTimeOffset? StartedAt, string? LastPrompt,
+        string? State, string? Slot, DateTimeOffset LastEventAt);
+
+    public IReadOnlyList<SessionInfo> GetSessions()
+    {
+        var routes = _routes.ReadRoutes();
+        lock (_lock)
+        {
+            return _sessions.Values
+                .Select(s => new SessionInfo(s.SessionId, s.Cwd, s.StartedAt, s.LastPrompt, s.CurrentState,
+                                             routes.TryGetValue(s.SessionId, out var slot) ? slot : null, s.LastEventAt))
+                .OrderByDescending(s => s.StartedAt ?? DateTimeOffset.MinValue)
+                .ToList();
+        }
+    }
+
+    public bool Bind(string sessionId, string slot)
+    {
+        var ok = _routes.Bind(sessionId, slot);
+        if (ok) lock (_lock) { _autoAssigned.Add(sessionId); if (_sessions.TryGetValue(sessionId, out var s)) s.InvalidateLastEmit(); }
+        return ok;
+    }
+
+    public void Unbind(string sessionId)
+    {
+        _routes.Unbind(sessionId);
+        lock (_lock) _autoAssigned.Add(sessionId);   // user's choice: don't auto-assign it again
+    }
+
+    /// <summary>Write one command line to the device (provision, keygen, identify, …). False = link closed.</summary>
+    public bool SendDeviceCommand(JsonObject command)
+    {
+        var json = command.ToJsonString();
+        lock (_lock)
+        {
+            if (!_link.IsOpen) _link.TryOpen();
+            var ok = _link.WriteLine(json);
+            Log.Info(ok ? $"[bridge] cmd -> {json}" : $"[bridge] cmd dropped (link closed): {json}");
+            return ok;
+        }
     }
 
     public async Task RunAsync(CancellationToken ct)
     {
+        void OnDeviceLine(JsonNode doc)
+        {
+            try { if (doc["type"]?.GetValue<string>() == "pong") LatestPong = doc; } catch { }
+            var h = DeviceLineReceived;
+            if (h is not null) Task.Run(() => h(doc));
+        }
+        _link.LineReceived += OnDeviceLine;
+
         var thinkingTicker  = Task.Run(() => ThinkingTickerAsync(ct), ct);
         var serialMonitor   = Task.Run(() => SerialMonitorAsync(ct), ct);
         var collisionTicker = Task.Run(() => CollisionTickerAsync(ct), ct);
@@ -105,6 +176,7 @@ public sealed class BridgeRunner
         }
         finally
         {
+            _link.LineReceived -= OnDeviceLine;
             try { await thinkingTicker; }  catch { }
             try { await serialMonitor; }   catch { }
             try { await collisionTicker; } catch { }
@@ -142,11 +214,28 @@ public sealed class BridgeRunner
                 // configure / reemit happen in SerialMonitorAsync.
                 if (!_link.IsOpen) _link.TryOpen();
 
-                var routes = _broker.ReadAllRoutes();
                 var endpoints = _broker.FindAllBrokers().ToList();
-                var wanted = endpoints
-                    .Where(e => routes.ContainsKey(e.SessionId))
-                    .ToList();
+
+                // MANAGEMENT.md: auto-assign sessions that appear without a
+                // route, once each, to the lowest free offered slot.
+                if (_options.AutoAssignNewSessions)
+                {
+                    var routesNow = _routes.ReadRoutes();
+                    foreach (var e in endpoints)
+                    {
+                        if (routesNow.ContainsKey(e.SessionId)) continue;
+                        bool seen;
+                        lock (_lock) seen = !_autoAssigned.Add(e.SessionId);
+                        if (seen) continue;
+                        var slot = _routes.FirstFreeSlot();
+                        if (slot is null) { Log.Info($"[bridge] session {Shorten(e.SessionId)} appeared; no free slot to auto-assign"); continue; }
+                        if (_routes.Bind(e.SessionId, slot)) Log.Info($"[bridge] auto-assigned {Shorten(e.SessionId)} -> {slot}");
+                    }
+                }
+
+                // Subscribe to EVERY live session (labels need their events);
+                // EmitSnapshotIfChangedLocked only forwards routed ones.
+                var wanted = endpoints;
                 var wantedIds = new HashSet<string>(
                     wanted.Select(e => e.SessionId), StringComparer.Ordinal);
 
@@ -168,6 +257,12 @@ public sealed class BridgeRunner
                 {
                     if (subs.ContainsKey(endpoint.SessionId)) continue;
                     Log.Info($"[bridge] subscribing to session {Shorten(endpoint.SessionId)} on port {endpoint.Port}");
+                    lock (_lock)
+                    {
+                        var st = SessionFor(endpoint.SessionId);
+                        st.Cwd ??= endpoint.Cwd;
+                        st.StartedAt ??= endpoint.StartedAt;
+                    }
                     var subCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     var task = Task.Run(() => SubscribeOneAsync(endpoint, subCts.Token), subCts.Token);
                     subs[endpoint.SessionId] = new ActiveSubscription
@@ -258,6 +353,21 @@ public sealed class BridgeRunner
                 ForwardFirmwareCommandLocked(parsed.FirmwareCommand);
 
             var session = SessionFor(eventSessionId);
+            session.LastEventAt = DateTimeOffset.Now;
+            try { session.Cwd ??= rawNode?["cwd"]?.GetValue<string>(); } catch { }
+            if (parsed.EventName == "UserPromptSubmit")
+            {
+                try
+                {
+                    var prompt = rawNode?["prompt"]?.GetValue<string>();
+                    if (!string.IsNullOrWhiteSpace(prompt) && !prompt.StartsWith("/"))
+                    {
+                        var firstLine = prompt.Split('\n')[0].Trim();
+                        session.LastPrompt = firstLine.Length > 80 ? firstLine[..80] + "…" : firstLine;
+                    }
+                }
+                catch { }
+            }
 
             // --- subagent counter ---
             if (parsed.EventName == "PreToolUse" && parsed.ToolName == "Agent")
@@ -335,6 +445,7 @@ public sealed class BridgeRunner
         // Re-read route on each emit so /claude-status:show changes
         // take effect at the next snapshot without a bridge restart.
         var clientSlot = _broker.ReadRouteForSession(session.SessionId);
+        if (clientSlot is null) return;   // unrouted sessions stay invisible (v0.4 policy)
 
         if (session.CurrentState == session.LastEmittedState
             && session.SubagentCount == session.LastEmittedSubagentCount

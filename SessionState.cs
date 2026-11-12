@@ -40,6 +40,12 @@ internal sealed class SessionState
     public int LastEmittedTasksCompleted  = -1;
     public string? LastEmittedClientSlot;
 
+    // Labelling (MANAGEMENT.md §1): from broker.json v2 and the event stream.
+    public string? Cwd;
+    public DateTimeOffset? StartedAt;
+    public string? LastPrompt;
+    public DateTimeOffset LastEventAt = DateTimeOffset.Now;
+
     public SessionState(string sessionId) { SessionId = sessionId; }
 
     public int TasksActive    => Tasks.Values.Count(s => s == "pending" || s == "in_progress");

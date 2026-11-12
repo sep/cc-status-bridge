@@ -23,6 +23,19 @@ public sealed class BridgeOptions
     /// </summary>
     public string Transport { get; set; } = "serial";
     public SshOptions Ssh { get; set; } = new();
+
+    /// <summary>
+    /// MANAGEMENT.md: when a session appears with no route, bind it to the
+    /// lowest free offered slot so it lights up without a slash command.
+    /// </summary>
+    public bool AutoAssignNewSessions { get; set; } = true;
+
+    /// <summary>
+    /// Panel numbers the management window offers as two half slots (Na/Nb)
+    /// instead of one full slot. A UI notion only; the firmware renders
+    /// whichever slots receive state.
+    /// </summary>
+    public int[] SplitPanels { get; set; } = Array.Empty<int>();
     public bool UsesSsh => string.Equals(Transport, "ssh", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>

@@ -13,7 +13,7 @@ public sealed class BrokerClient
         _options = options;
     }
 
-    public record BrokerEndpoint(string SessionId, int Port, DateTime Mtime);
+    public record BrokerEndpoint(string SessionId, int Port, DateTime Mtime, string? Cwd = null, DateTimeOffset? StartedAt = null);
 
     /// <summary>
     /// Yields every directory the bridge should inspect for broker state
@@ -274,7 +274,17 @@ public sealed class BrokerClient
                          ?? fallbackSessionId
                          ?? (sessionDir is not null ? Path.GetFileName(sessionDir) : null);
             if (string.IsNullOrWhiteSpace(sessionId)) return null;
-            return new BrokerEndpoint(sessionId, port, File.GetLastWriteTimeUtc(stateFile));
+            // broker.json v2 (plugin >= 0.5.1): cwd + started_at for labels. Optional.
+            string? cwd = null;
+            DateTimeOffset? startedAt = null;
+            try { cwd = node?["cwd"]?.GetValue<string>(); } catch { }
+            try
+            {
+                var secs = node?["started_at"]?.GetValue<double>();
+                if (secs is > 0) startedAt = DateTimeOffset.FromUnixTimeMilliseconds((long)(secs.Value * 1000));
+            }
+            catch { }
+            return new BrokerEndpoint(sessionId, port, File.GetLastWriteTimeUtc(stateFile), cwd, startedAt);
         }
         catch
         {

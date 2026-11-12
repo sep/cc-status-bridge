@@ -27,6 +27,8 @@ internal static class TrayHost
     private static CancellationTokenSource? _runnerCts;
     private static Task? _runnerTask;
     private static LogsWindow? _logsWindow;
+    private static ManagementWindow? _manageWindow;
+    private static NativeMenuItem? _manageItem;
 
     private static NativeMenuItem? _statusItem;
     private static NativeMenuItem? _pauseResumeItem;
@@ -106,6 +108,7 @@ internal static class TrayHost
         if (_statusItem is not null)        menu.Add(_statusItem);
         if (_pauseResumeItem is not null)   menu.Add(_pauseResumeItem);
         menu.Add(new NativeMenuItemSeparator());
+        if (_manageItem is not null)        menu.Add(_manageItem);
         if (_connectDeviceItem is not null) menu.Add(_connectDeviceItem);
         if (_resendConfigItem is not null)  menu.Add(_resendConfigItem);
         if (_autoRunItem is not null)       menu.Add(_autoRunItem);
@@ -124,6 +127,8 @@ internal static class TrayHost
         _statusItem = new NativeMenuItem("Status: starting...") { IsEnabled = false };
         _pauseResumeItem = new NativeMenuItem("Pause subscription");
         _pauseResumeItem.Click += (_, _) => TogglePauseResume();
+        _manageItem = new NativeMenuItem("Manage display…");
+        _manageItem.Click += (_, _) => ShowManagement();
         _resendConfigItem = new NativeMenuItem("Resend panel config");
         _resendConfigItem.Click += (_, _) => ResendPanelConfig();
         _autoRunItem = new NativeMenuItem("Run on login")
@@ -173,9 +178,9 @@ internal static class TrayHost
         UpdatePauseResumeLabel(paused: false);
     }
 
-    private static void StopBridgeAsync()
+    private static Task StopBridgeAsync()
     {
-        if (_runner is null) return;
+        if (_runner is null) return Task.CompletedTask;
         var cts = _runnerCts;
         var task = _runnerTask;
         var runner = _runner;
@@ -183,7 +188,7 @@ internal static class TrayHost
         _runnerCts = null;
         _runnerTask = null;
 
-        Task.Run(async () =>
+        return Task.Run(async () =>
         {
             try { cts?.Cancel(); } catch { }
             try { if (task is not null) await task; } catch { }
@@ -419,6 +424,31 @@ internal static class TrayHost
         _link = CreateLink(_options);
 
         Dispatcher.UIThread.Post(StartBridge);
+    }
+
+    /// <summary>Stop, then start again on the UI thread — picks up a changed transport/options.</summary>
+    private static async Task RestartBridgeAsync()
+    {
+        await StopBridgeAsync();
+        Dispatcher.UIThread.Post(StartBridge);
+    }
+
+    private static void ShowManagement()
+    {
+        if (_options is null) return;
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_manageWindow is null || !_manageWindow.IsVisible)
+            {
+                _manageWindow = new ManagementWindow(_options, () => _runner, RestartBridgeAsync);
+                _manageWindow.Closed += (_, _) => _manageWindow = null;
+                _manageWindow.Show();
+            }
+            else
+            {
+                _manageWindow.Activate();
+            }
+        });
     }
 
     // ============================================================

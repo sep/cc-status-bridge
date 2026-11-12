@@ -82,7 +82,7 @@ remote link. v1.5 candidate: a per-slot channel tag so the window can say
 
 ## The window
 
-One window, three tabs, opened from the tray menu ("Manage display…").
+One window, two tabs, opened from the tray menu ("Manage display…").
 Avalonia, like `ConnectDeviceWindow` and `LogsWindow`.
 
 ### Display tab
@@ -119,9 +119,11 @@ The provisioning flow from FIRMWARE.md §8 v1.4: USB connection required;
 SSH fields the bridge itself needs (`host`, `port`, `user`,
 `listen_port`, local port).
 
-### Logs tab
+### Logs
 
-The existing `LogsWindow` content.
+Stays its own window ("Show logs" in the tray menu) rather than a tab:
+nothing about it changes, and keeping it separate lets it sit beside the
+management window while provisioning.
 
 ## Bridge settings (additions)
 

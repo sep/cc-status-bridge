@@ -1,7 +1,30 @@
 namespace ClaudeStatusBridge;
 
+public sealed class SshOptions
+{
+    public string Host       { get; set; } = "";
+    public int    Port       { get; set; } = 22;
+    public string User       { get; set; } = "claudepanel";
+    /// <summary>Port the device holds on the server's loopback (its listen_port).</summary>
+    public int    ListenPort { get; set; } = 7777;
+    /// <summary>Port on this machine's loopback that ssh -L binds.</summary>
+    public int    LocalPort  { get; set; } = 7777;
+    /// <summary>OpenSSH client; "ssh" on PATH by default.</summary>
+    public string Executable { get; set; } = "ssh";
+    /// <summary>Extra ssh arguments, space-separated (e.g. "-i C:/keys/bridge_ed25519").</summary>
+    public string ExtraArgs  { get; set; } = "";
+}
+
 public sealed class BridgeOptions
 {
+    /// <summary>
+    /// "serial" (USB-Serial-JTAG; the default) or "ssh" (wire v1.4 remote
+    /// link through <see cref="Ssh"/>). Selects the <see cref="IDeviceLink"/>.
+    /// </summary>
+    public string Transport { get; set; } = "serial";
+    public SshOptions Ssh { get; set; } = new();
+    public bool UsesSsh => string.Equals(Transport, "ssh", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>
     /// Optional explicit override for the state directory. When set, the
     /// bridge looks ONLY here. When empty (default), the bridge

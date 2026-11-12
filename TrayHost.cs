@@ -22,7 +22,7 @@ internal static class TrayHost
     private static IClassicDesktopStyleApplicationLifetime? _desktop;
     private static BridgeOptions? _options;
     private static BrokerClient? _broker;
-    private static SerialOutput? _serial;
+    private static IDeviceLink? _link;
     private static BridgeRunner? _runner;
     private static CancellationTokenSource? _runnerCts;
     private static Task? _runnerTask;
@@ -65,7 +65,7 @@ internal static class TrayHost
         config.GetSection("Bridge").Bind(_options);
 
         _broker = new BrokerClient(_options);
-        _serial = new SerialOutput(_options);
+        _link = CreateLink(_options);
 
         BuildMenu();
         _trayIcon = new TrayIcon
@@ -86,9 +86,9 @@ internal static class TrayHost
         // Otherwise we'd silently fail to open the port and leave the
         // user staring at a gray tray icon with no feedback.
         var configured = _options.ComPort ?? "";
-        if (Platform.Current.PortNameLooksValid(configured))
+        if (_options.UsesSsh || Platform.Current.PortNameLooksValid(configured))
         {
-            StartBridge();
+            StartBridge();   // ssh transport needs no serial port
         }
         else
         {
@@ -141,6 +141,10 @@ internal static class TrayHost
     // Bridge lifecycle (subscription start / pause / resume)
     // ============================================================
 
+    /// <summary>The device link the settings ask for: USB serial (default) or the v1.4 SSH tunnel.</summary>
+    private static IDeviceLink CreateLink(BridgeOptions o) =>
+        o.UsesSsh ? new SshTunnelLink(o) : new SerialOutput(o);
+
     private static void StartBridge()
     {
         if (_runner is not null) return;
@@ -150,10 +154,10 @@ internal static class TrayHost
         // reopen the port that StopBridgeAsync released. On the very
         // first start this is a no-op (AttachTo already created one);
         // on every Resume after a Pause it does the actual reopen.
-        if (_serial is null) _serial = new SerialOutput(_options);
+        if (_link is null) _link = CreateLink(_options);
 
         _runnerCts = new CancellationTokenSource();
-        _runner = new BridgeRunner(_options, _broker, _serial);
+        _runner = new BridgeRunner(_options, _broker, _link);
         _runner.AggregateStateChanged += OnAggregateStateChanged;
         _runnerTask = Task.Run(() => _runner.RunAsync(_runnerCts.Token));
 
@@ -191,8 +195,8 @@ internal static class TrayHost
             // paused. Done AFTER the runner task has exited so we
             // don't race the runner's own serial I/O during teardown.
             // StartBridge() lazy-creates a fresh SerialOutput on resume.
-            try { _serial?.Dispose(); } catch { }
-            _serial = null;
+            try { _link?.Dispose(); } catch { }
+            _link = null;
 
             Dispatcher.UIThread.Post(() =>
             {
@@ -411,8 +415,8 @@ internal static class TrayHost
         // Recreate SerialOutput against the updated options. SerialOutput
         // re-reads ComPort lazily on each open, so a fresh instance picks
         // up the new value on its next reconnect attempt.
-        try { _serial?.Dispose(); } catch { }
-        _serial = new SerialOutput(_options);
+        try { _link?.Dispose(); } catch { }
+        _link = CreateLink(_options);
 
         Dispatcher.UIThread.Post(StartBridge);
     }
@@ -445,8 +449,8 @@ internal static class TrayHost
             return;
         }
         _options.ComPort = port;
-        try { _serial?.Dispose(); } catch { }
-        _serial = new SerialOutput(_options);
+        try { _link?.Dispose(); } catch { }
+        _link = CreateLink(_options);
         StartBridge();
     }
 
@@ -490,7 +494,7 @@ internal static class TrayHost
         Log.Info($"[bridge] quit: runner cts cancel done ({sw.ElapsedMilliseconds}ms)");
 
         sw.Restart();
-        try { _serial?.Dispose(); } catch { }
+        try { _link?.Dispose(); } catch { }
         Log.Info($"[bridge] quit: serial dispose done ({sw.ElapsedMilliseconds}ms)");
 
         // Avalonia shutdown happens on the UI thread; we Post the request

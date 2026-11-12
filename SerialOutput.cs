@@ -4,9 +4,11 @@ using System.Text.Json.Nodes;
 
 namespace ClaudeStatusBridge;
 
-public sealed class SerialOutput : IDisposable
+public sealed class SerialOutput : IDeviceLink
 {
     private readonly BridgeOptions _options;
+
+    public string Describe => $"serial {_options.ComPort}";
     private SerialPort? _port;
     private readonly object _lock = new();
 

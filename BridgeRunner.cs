@@ -15,7 +15,7 @@ public sealed class BridgeRunner
 {
     private readonly BridgeOptions _options;
     private readonly BrokerClient _broker;
-    private readonly SerialOutput _serial;
+    private readonly IDeviceLink _link;
 
     private readonly object _lock = new();
 
@@ -86,11 +86,11 @@ public sealed class BridgeRunner
         return "(none)";
     }
 
-    public BridgeRunner(BridgeOptions options, BrokerClient broker, SerialOutput serial)
+    public BridgeRunner(BridgeOptions options, BrokerClient broker, IDeviceLink link)
     {
         _options = options;
         _broker = broker;
-        _serial = serial;
+        _link = link;
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -140,7 +140,7 @@ public sealed class BridgeRunner
             {
                 // Make sure serial is open if the device is plugged in;
                 // configure / reemit happen in SerialMonitorAsync.
-                if (!_serial.IsOpen) _serial.TryOpen();
+                if (!_link.IsOpen) _link.TryOpen();
 
                 var routes = _broker.ReadAllRoutes();
                 var endpoints = _broker.FindAllBrokers().ToList();
@@ -302,11 +302,11 @@ public sealed class BridgeRunner
     private void ForwardFirmwareCommandLocked(JsonNode cmd)
     {
         var cmdJson = cmd.ToJsonString();
-        if (!_serial.IsOpen) _serial.TryOpen();
-        if (_serial.WriteLine(cmdJson))
+        if (!_link.IsOpen) _link.TryOpen();
+        if (_link.WriteLine(cmdJson))
             Log.Info($"[bridge] fw-cmd -> {cmdJson}");
         else
-            Log.Warn($"[bridge] fw-cmd dropped (serial closed): {cmdJson}");
+            Log.Warn($"[bridge] fw-cmd dropped (link closed): {cmdJson}");
     }
 
     private void SetStateLocked(SessionState session, string newState)
@@ -346,15 +346,15 @@ public sealed class BridgeRunner
         var line = StateMapper.BuildDeviceLine(
             session.CurrentState, clientSlot, session.SubagentCount,
             tasksActive, tasksCompleted, eventName, ts);
-        if (!_serial.IsOpen) _serial.TryOpen();
-        if (_serial.WriteLine(line))
+        if (!_link.IsOpen) _link.TryOpen();
+        if (_link.WriteLine(line))
         {
             Log.Info($"[bridge] -> {line}");
             session.LastEmit = DateTimeOffset.Now;
         }
         else
         {
-            Log.Warn($"[bridge] dropped (serial closed): {line}");
+            Log.Warn($"[bridge] dropped (link closed): {line}");
         }
 
         session.LastEmittedState           = session.CurrentState;
@@ -370,35 +370,45 @@ public sealed class BridgeRunner
 
     private async Task SerialMonitorAsync(CancellationToken ct)
     {
-        var previouslyAvailable = _serial.IsDeviceAvailable();
-        Log.Info($"[bridge] serial monitor: {_options.ComPort} initially {(previouslyAvailable ? "available" : "unavailable")}, polling every {_options.SerialPollIntervalMs}ms");
-        if (previouslyAvailable && _serial.IsOpen) lock (_lock) { SendConfigureIfChangedLocked(); }
+        var previouslyAvailable = _link.IsDeviceAvailable();
+        var previouslyOpen      = _link.IsOpen;
+        Log.Info($"[bridge] link monitor: {_link.Describe} initially {(previouslyAvailable ? "available" : "unavailable")}, polling every {_options.SerialPollIntervalMs}ms");
+        if (previouslyOpen) lock (_lock) { SendConfigureIfChangedLocked(); }
         try
         {
             while (!ct.IsCancellationRequested)
             {
                 await Task.Delay(_options.SerialPollIntervalMs, ct);
-                var available = _serial.IsDeviceAvailable();
+                var available = _link.IsDeviceAvailable();
 
                 if (available && !previouslyAvailable)
-                {
-                    Log.Info($"[bridge] device on {_options.ComPort} appeared");
-                    if (_serial.TryOpen())
-                    {
-                        lock (_lock)
-                        {
-                            SendConfigureIfChangedLocked();
-                            ForceReemitAllSessionsLocked();
-                        }
-                    }
-                }
+                    Log.Info($"[bridge] device on {_link.Describe} appeared");
                 else if (!available && previouslyAvailable)
                 {
-                    Log.Warn($"[bridge] device on {_options.ComPort} disappeared");
-                    _serial.CloseIfOpen();
+                    Log.Warn($"[bridge] device on {_link.Describe} disappeared");
+                    _link.CloseIfOpen();
                 }
 
+                // (Re)open whenever the device is there but the link isn't —
+                // covers first appearance, a dropped SSH forward, and a serial
+                // port that was busy on the previous poll. Links rate-limit
+                // their own retries. A fresh open gets a full re-emit so a
+                // device that rebooted while we were away catches up
+                // (FIRMWARE.md §8 "Bridge behavior", v1.4).
+                if (available && !_link.IsOpen && _link.TryOpen())
+                {
+                    Log.Info($"[bridge] link open: {_link.Describe}");
+                    lock (_lock)
+                    {
+                        SendConfigureIfChangedLocked();
+                        ForceReemitAllSessionsLocked();
+                    }
+                }
+                if (previouslyOpen && !_link.IsOpen)
+                    Log.Warn($"[bridge] link closed: {_link.Describe}");
+
                 previouslyAvailable = available;
+                previouslyOpen      = _link.IsOpen;
             }
         }
         catch (OperationCanceledException) { }
@@ -435,6 +445,7 @@ public sealed class BridgeRunner
             if (layout is null)
                 return "no panel layout configured yet";
             _lastConfiguredJson = null;  // treat as changed: always send
+            _forceConfigure = true;
             SendConfigureIfChangedLocked();
             // Success path stamps _lastConfiguredJson; failure leaves it null.
             return _lastConfiguredJson is not null
@@ -442,6 +453,13 @@ public sealed class BridgeRunner
                 : "config send failed (see logs)";
         }
     }
+
+    // What the device last told us it is running (from pong). Null until
+    // the first pong of this link. Drives the v1.4 "configure on mismatch"
+    // rule below.
+    private int? _devicePanelCount;
+    private int? _deviceFirstId;
+    private bool _forceConfigure;
 
     private void SendConfigureIfChangedLocked()
     {
@@ -457,16 +475,49 @@ public sealed class BridgeRunner
             ["first_id"]     = layout.FirstId,
         };
         var json = doc.ToJsonString();
-        if (json == _lastConfiguredJson) return;
-        if (!_serial.IsOpen) _serial.TryOpen();
-        if (_serial.WriteLine(json))
+
+        // v1.4 rule (FIRMWARE.md §8 "Bridge behavior"): send configure only
+        // when the device's reported layout differs from ours, or on an
+        // explicit resend. Two bridges that agree never fight; two that
+        // disagree make the panel flip visibly. Before the first pong we
+        // don't know what the device has, so we wait for one.
+        if (!_forceConfigure)
         {
-            Log.Info($"[bridge] configure -> {json}");
+            if (_devicePanelCount is null) return;
+            if (_devicePanelCount == layout.PanelCount && _deviceFirstId == layout.FirstId)
+            {
+                _lastConfiguredJson = json;   // agree: nothing to send
+                return;
+            }
+            if (json == _lastConfiguredJson) return;   // already sent this; wait for the device to catch up
+        }
+        if (!_link.IsOpen) _link.TryOpen();
+        if (_link.WriteLine(json))
+        {
+            Log.Info($"[bridge] configure -> {json} (device reported panel_count={_devicePanelCount?.ToString() ?? "?"}, first_id={_deviceFirstId?.ToString() ?? "?"})");
             _lastConfiguredJson = json;
+            _forceConfigure = false;
         }
         else
         {
-            Log.Warn($"[bridge] configure dropped (serial closed): {json}");
+            Log.Warn($"[bridge] configure dropped (link closed): {json}");
+        }
+    }
+
+    /// <summary>Called by the pinger with every pong: remember the device's layout and
+    /// let the mismatch rule run.</summary>
+    private void NoteDeviceLayout(JsonNode pong)
+    {
+        int? count = null, first = null;
+        try { count = pong["panel_count"]?.GetValue<int>(); } catch { }
+        try { first = pong["first_id"]?.GetValue<int>(); } catch { }
+        if (count is null) return;
+        lock (_lock)
+        {
+            var changed = count != _devicePanelCount || first != _deviceFirstId;
+            _devicePanelCount = count;
+            _deviceFirstId    = first;
+            if (changed) SendConfigureIfChangedLocked();
         }
     }
 
@@ -566,8 +617,8 @@ public sealed class BridgeRunner
                 ["sessions"] = count,
             };
             var json = hint.ToJsonString();
-            if (!_serial.IsOpen) _serial.TryOpen();
-            if (_serial.WriteLine(json))
+            if (!_link.IsOpen) _link.TryOpen();
+            if (_link.WriteLine(json))
             {
                 _lastCollisionHint[slot] = now;
                 Log.Info($"[bridge] collision-hint -> {json}");
@@ -610,6 +661,7 @@ public sealed class BridgeRunner
         void OnLine(JsonNode doc)
         {
             if (doc["type"]?.GetValue<string>() != "pong") return;
+            NoteDeviceLayout(doc);
             var seqValue = doc["seq"];
             if (seqValue is null) return;
             long seq;
@@ -624,7 +676,7 @@ public sealed class BridgeRunner
                 if (seq > _lastSeqAcked) _lastSeqAcked = seq;
             }
         }
-        _serial.LineReceived += OnLine;
+        _link.LineReceived += OnLine;
 
         var pingInterval = TimeSpan.FromMilliseconds(_options.PingIntervalMs);
         var pingTimeout  = TimeSpan.FromMilliseconds(_options.PingTimeoutMs);
@@ -664,7 +716,7 @@ public sealed class BridgeRunner
                 }
 
                 // Send a fresh ping if the port is open.
-                if (_serial.IsOpen)
+                if (_link.IsOpen)
                 {
                     long seq;
                     lock (_pingLock)
@@ -680,7 +732,7 @@ public sealed class BridgeRunner
                         ["ts"]   = ts,
                     };
                     // Don't log; per-5s noise would drown the rest of the log.
-                    _serial.WriteLine(ping.ToJsonString());
+                    _link.WriteLine(ping.ToJsonString());
                 }
 
                 try { await Task.Delay(pingInterval, ct); }
@@ -689,7 +741,7 @@ public sealed class BridgeRunner
         }
         finally
         {
-            _serial.LineReceived -= OnLine;
+            _link.LineReceived -= OnLine;
         }
     }
 

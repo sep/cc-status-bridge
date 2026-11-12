@@ -30,6 +30,40 @@ After install, right-click the tray icon → **Connect device** to point
 the bridge at the ESP32-S3 panel you flashed in step 1 of the
 [full setup walkthrough](https://sep.github.io/cc-status-plugin/#installation).
 
+## Remote display over SSH (wire v1.4)
+
+The bridge can reach a display that has no direct network path to it —
+different VLAN, different site — through an SSH account both can dial out
+to. The device holds a remote port forward on that server; the bridge runs
+the platform's OpenSSH client headless with a local forward to it. Design
+and server setup: [`FIRMWARE.md`](FIRMWARE.md) §8 "Remote link over SSH";
+host-side routing and the management window: [`MANAGEMENT.md`](MANAGEMENT.md).
+
+Tray menu → **Manage display…**:
+
+- *Display* tab — panel count, first id, per-panel split, the slot grid
+  and the session list; click a session then a slot to route it; "Auto-assign
+  new sessions" (default on) lights a new session up without any slash
+  command.
+- *Remote link* tab — with the device on USB: generate its key, copy the
+  `authorized_keys` line, send Wi-Fi + server settings, pin the host key,
+  read its status; then switch this bridge's transport to SSH.
+
+Settings (`appsettings.json` `Bridge` section, or `CSB_BRIDGE__…` env vars):
+
+```json
+"Transport": "ssh",
+"Ssh": { "Host": "vm.example.net", "Port": 22, "User": "claudepanel",
+         "ListenPort": 7777, "LocalPort": 7777, "Executable": "ssh", "ExtraArgs": "" },
+"AutoAssignNewSessions": true,
+"SplitPanels": [2]
+```
+
+`Transport` defaults to `serial`. The SSH client is the user's own
+(`~/.ssh/config`, agent and keys apply); `ExtraArgs` is for an explicit
+`-i` or similar. Harnesses: `tools/ssh-link-smoke` (the transport, against
+a device stand-in) and `tools/route-smoke` (the routing rules).
+
 ## Wire-protocol spec
 
 The bridge ↔ firmware contract is documented in [`FIRMWARE.md`](FIRMWARE.md).

@@ -894,11 +894,14 @@ absence.
 
 - An SSH account the device and every bridge can reach; no shell needed.
 - `AllowTcpForwarding yes` (OpenSSH default). `GatewayPorts` stays `no`.
-- **`ClientAliveInterval 30` and `ClientAliveCountMax 3`, not optional.**
-  A device that drops off Wi-Fi leaves its session — and the forwarded
-  port — alive until TCP times out; without ClientAlive that can be hours,
-  and every reconnect in between gets `forward_refused`. With it the port
-  frees in ~90 s. To see who holds a port: `ss -ltnp | grep 7777` (Linux)
+- **`ClientAliveInterval 10` and `ClientAliveCountMax 3`, not optional.**
+  A device that drops off Wi-Fi or resets leaves its session — and the
+  forwarded port — alive until the server decides the client is gone;
+  without ClientAlive that is until TCP gives up, which can be hours, and
+  every reconnect in between gets `forward_refused`. With these values the
+  port frees in ~30 s (the device retries every 5 s and recovers on its
+  own). `sshd -T | grep -i clientalive` shows what the running daemon
+  actually uses. To see who holds a port: `ss -ltnp | grep 7777` (Linux)
   or `sockstat -4 -l | grep 7777` (FreeBSD).
 - `authorized_keys`: the device's line from `pubkey`; for each laptop
   `restrict,port-forwarding,permitopen="localhost:7777" <laptop key>`.

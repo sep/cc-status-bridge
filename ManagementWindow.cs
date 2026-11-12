@@ -105,9 +105,8 @@ internal sealed class ManagementWindow : Window
         var copyKey = new Button { Content = "Copy authorized_keys line", Padding = new Thickness(14, 4) };
         copyKey.Click += async (_, _) =>
         {
-            var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
-            if (clipboard is null || _keyOut.Tag is not string line) return;
-            await clipboard.SetTextAsync(line);
+            if (TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard && _keyOut.Tag is string line)
+                await clipboard.SetTextAsync(line);
         };
         _keyOut = new TextBox { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Height = 70, FontSize = 11,
                                 FontFamily = new FontFamily("Cascadia Mono, Consolas, Menlo, monospace") };

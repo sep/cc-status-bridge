@@ -102,14 +102,15 @@ internal sealed class ManagementWindow : Window
         provision.Click += (_, _) => Provision();
         var keygen = new Button { Content = "Generate / show device key", Padding = new Thickness(14, 4) };
         keygen.Click += (_, _) => Send(new JsonObject { ["type"] = "keygen" });
+        _keyOut = new TextBox { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Height = 70, FontSize = 11,
+                                FontFamily = new FontFamily("Cascadia Mono, Consolas, Menlo, monospace") };
         var copyKey = new Button { Content = "Copy authorized_keys line", Padding = new Thickness(14, 4) };
         copyKey.Click += async (_, _) =>
         {
-            if (TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard && _keyOut.Tag is string line)
+            var keyOut = _keyOut;
+            if (TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard && keyOut.Tag is string line)
                 await clipboard.SetTextAsync(line);
         };
-        _keyOut = new TextBox { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Height = 70, FontSize = 11,
-                                FontFamily = new FontFamily("Cascadia Mono, Consolas, Menlo, monospace") };
         _hostkeyLabel = new TextBlock { Text = "Host key: (none seen yet — provision, then wait for the device to connect)", FontSize = 12, TextWrapping = TextWrapping.Wrap };
         var pin = new Button { Content = "Pin this host key", Padding = new Thickness(14, 4) };
         pin.Click += (_, _) => { if (_lastSeenFingerprint is not null) Send(new JsonObject { ["type"] = "pin_hostkey", ["fingerprint"] = _lastSeenFingerprint }); };

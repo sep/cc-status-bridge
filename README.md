@@ -54,14 +54,23 @@ Settings (`appsettings.json` `Bridge` section, or `CSB_BRIDGE__…` env vars):
 ```json
 "Transport": "ssh",
 "Ssh": { "Host": "vm.example.net", "Port": 22, "User": "claudepanel",
-         "ListenPort": 7777, "LocalPort": 7777, "Executable": "ssh", "ExtraArgs": "" },
+         "ListenPort": 7777, "LocalPort": 7777, "Executable": "ssh",
+         "IdentityFile": "~/.ssh/claudepanel_bridge", "ExtraArgs": "" },
 "AutoAssignNewSessions": true,
 "SplitPanels": [2]
 ```
 
 `Transport` defaults to `serial`. The SSH client is the user's own
-(`~/.ssh/config`, agent and keys apply); `ExtraArgs` is for an explicit
-`-i` or similar. Harnesses: `tools/ssh-link-smoke` (the transport, against
+(`~/.ssh/config` and agent apply). Give the bridge a **dedicated,
+passphrase-less key** in `IdentityFile` — it runs `ssh` in batch mode and
+cannot answer a passphrase prompt, and with `IdentityFile` set it offers
+nothing else (`IdentitiesOnly`):
+
+```sh
+ssh-keygen -t ed25519 -f ~/.ssh/claudepanel_bridge -N "" -C "claudepanel bridge"
+# on the server, next to the device's line:
+#   restrict,port-forwarding,permitopen="localhost:7777" ssh-ed25519 AAAA… claudepanel bridge
+``` Harnesses: `tools/ssh-link-smoke` (the transport, against
 a device stand-in) and `tools/route-smoke` (the routing rules).
 
 ## Wire-protocol spec

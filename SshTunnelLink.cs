@@ -168,6 +168,18 @@ public sealed class SshTunnelLink : IDeviceLink
                 "-o", "StrictHostKeyChecking=accept-new",
                 "-L", $"{_o.Ssh.LocalPort}:localhost:{_o.Ssh.ListenPort}",
             }) psi.ArgumentList.Add(a);
+            if (!string.IsNullOrWhiteSpace(_o.Ssh.IdentityFile))
+            {
+                var key = _o.Ssh.IdentityFile.Trim();
+                if (key.StartsWith("~/") || key == "~")
+                    key = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), key.Length > 2 ? key[2..] : "");
+                if (!File.Exists(key))
+                    Log.Warn($"[ssh] identity file not found: {key}");
+                psi.ArgumentList.Add("-i");
+                psi.ArgumentList.Add(key);
+                psi.ArgumentList.Add("-o");
+                psi.ArgumentList.Add("IdentitiesOnly=yes");
+            }
             if (!string.IsNullOrWhiteSpace(_o.Ssh.ExtraArgs))
                 foreach (var a in _o.Ssh.ExtraArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                     psi.ArgumentList.Add(a);

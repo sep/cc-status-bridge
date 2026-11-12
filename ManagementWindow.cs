@@ -36,7 +36,7 @@ internal sealed class ManagementWindow : Window
     private readonly TextBox _keyOut, _statusOut;
     private readonly TextBlock _hostkeyLabel;
     private readonly ComboBox _transport;
-    private readonly TextBox _bHost, _bPort, _bUser, _bListen, _bLocal, _bExtra;
+    private readonly TextBox _bHost, _bPort, _bUser, _bListen, _bLocal, _bIdentity, _bExtra;
     private string? _lastSeenFingerprint;
     private BridgeRunner? _subscribedRunner;
 
@@ -121,7 +121,8 @@ internal sealed class ManagementWindow : Window
 
         _transport = new ComboBox { ItemsSource = new[] { "serial", "ssh" }, Width = 110 };
         _bHost = Field(_options.Ssh.Host); _bPort = Field(_options.Ssh.Port.ToString()); _bUser = Field(_options.Ssh.User);
-        _bListen = Field(_options.Ssh.ListenPort.ToString()); _bLocal = Field(_options.Ssh.LocalPort.ToString()); _bExtra = Field(_options.Ssh.ExtraArgs);
+        _bListen = Field(_options.Ssh.ListenPort.ToString()); _bLocal = Field(_options.Ssh.LocalPort.ToString());
+        _bIdentity = Field(_options.Ssh.IdentityFile); _bIdentity.MinWidth = 260; _bExtra = Field(_options.Ssh.ExtraArgs);
         var saveTransport = new Button { Content = "Save & restart link", Padding = new Thickness(14, 4) };
         saveTransport.Click += async (_, _) => await SaveTransportAsync();
 
@@ -138,7 +139,15 @@ internal sealed class ManagementWindow : Window
         remotePanel.Children.Add(_statusOut);
         remotePanel.Children.Add(Heading("3. This bridge's transport"));
         remotePanel.Children.Add(Row(Label("Transport"), _transport, Label("Host"), _bHost, Label("Port"), _bPort, Label("User"), _bUser));
-        remotePanel.Children.Add(Row(Label("Device port"), _bListen, Label("Local port"), _bLocal, Label("Extra ssh args"), _bExtra, saveTransport));
+        remotePanel.Children.Add(Row(Label("Device port"), _bListen, Label("Local port"), _bLocal));
+        remotePanel.Children.Add(Row(Label("Identity file"), _bIdentity, Label("Extra ssh args"), _bExtra, saveTransport));
+        remotePanel.Children.Add(new TextBlock
+        {
+            FontSize = 11, TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#57606a")),
+            Text = "Use a dedicated passphrase-less key for the bridge (ssh runs in batch mode and cannot prompt): "
+                 + "ssh-keygen -t ed25519 -f ~/.ssh/claudepanel_bridge -N \"\"  — then add its .pub to the server as "
+                 + "restrict,port-forwarding,permitopen=\"localhost:<device port>\" <key>. \"~\" is expanded here.",
+        });
 
         var tabs = new TabControl();
         tabs.Items.Add(new TabItem { Header = "Display", Content = new ScrollViewer { Content = displayPanel } });
@@ -306,6 +315,7 @@ internal sealed class ManagementWindow : Window
         _options.Ssh.User = _bUser.Text ?? "";
         _options.Ssh.ListenPort = int.TryParse(_bListen.Text, out var lp) ? lp : 7777;
         _options.Ssh.LocalPort = int.TryParse(_bLocal.Text, out var lo) ? lo : 7777;
+        _options.Ssh.IdentityFile = _bIdentity.Text ?? "";
         _options.Ssh.ExtraArgs = _bExtra.Text ?? "";
         Persist(b =>
         {
@@ -314,7 +324,8 @@ internal sealed class ManagementWindow : Window
             {
                 ["Host"] = _options.Ssh.Host, ["Port"] = _options.Ssh.Port, ["User"] = _options.Ssh.User,
                 ["ListenPort"] = _options.Ssh.ListenPort, ["LocalPort"] = _options.Ssh.LocalPort,
-                ["Executable"] = _options.Ssh.Executable, ["ExtraArgs"] = _options.Ssh.ExtraArgs,
+                ["Executable"] = _options.Ssh.Executable, ["IdentityFile"] = _options.Ssh.IdentityFile,
+                ["ExtraArgs"] = _options.Ssh.ExtraArgs,
             };
         });
         _statusOut.Text = "transport saved; restarting the bridge link…";

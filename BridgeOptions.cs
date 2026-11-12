@@ -11,6 +11,12 @@ public sealed class SshOptions
     public int    LocalPort  { get; set; } = 7777;
     /// <summary>OpenSSH client; "ssh" on PATH by default.</summary>
     public string Executable { get; set; } = "ssh";
+    /// <summary>
+    /// Private key for this bridge (a dedicated, passphrase-less key — the
+    /// client runs in BatchMode and cannot prompt). "~" is expanded. When
+    /// set, ssh is told IdentitiesOnly so it offers nothing else.
+    /// </summary>
+    public string IdentityFile { get; set; } = "";
     /// <summary>Extra ssh arguments, space-separated (e.g. "-i C:/keys/bridge_ed25519").</summary>
     public string ExtraArgs  { get; set; } = "";
 }
